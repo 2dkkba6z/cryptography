@@ -323,6 +323,30 @@ fn is_non_residue(value: [u64; 4]) -> bool {
 /// Tail of [`is_non_residue`] once both operands fit in 128 bits.
 fn is_non_residue_u128(mut a: u128, mut n: u128, mut negate: bool) -> bool {
     while a != 0 {
+        if ((a | n) >> 64) == 0 {
+            return is_non_residue_u64(a as u64, n as u64, negate);
+        }
+        let shift = a.trailing_zeros();
+        if (shift & 1) == 1 && matches!(n & 7, 3 | 5) {
+            negate = !negate;
+        }
+        a >>= shift;
+
+        if a < n {
+            core::mem::swap(&mut a, &mut n);
+            if (a & 3) == 3 && (n & 3) == 3 {
+                negate = !negate;
+            }
+        }
+        a -= n;
+    }
+
+    n == 1 && negate
+}
+
+/// Tail of [`is_non_residue_u128`] once both operands fit in 64 bits.
+fn is_non_residue_u64(mut a: u64, mut n: u64, mut negate: bool) -> bool {
+    while a != 0 {
         let shift = a.trailing_zeros();
         if (shift & 1) == 1 && matches!(n & 7, 3 | 5) {
             negate = !negate;
