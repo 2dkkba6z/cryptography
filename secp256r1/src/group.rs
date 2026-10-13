@@ -551,18 +551,31 @@ impl ProjectivePoint {
             return None;
         }
 
-        let tables: Vec<_> = points.iter().copied().map(window4_table).collect();
+        // Odd multiples P, 3P, ..., 15P per point for width-5 signed NAFs.
+        let tables: Vec<_> = points
+            .iter()
+            .map(|point| {
+                let base = Self::from_affine(*point);
+                let base2 = base.double();
+                let mut table = [base; 8];
+                for i in 1..8 {
+                    table[i] = table[i - 1] + base2;
+                }
+                batch_normalize(table)
+            })
+            .collect();
+        let nafs: Vec<_> = scalars.iter().map(wnaf5).collect();
         let mut out = Self::IDENTITY;
 
-        for byte_index in 0..32 {
-            out = double_n(out, 4);
-            for (table, scalar) in tables.iter().zip(scalars) {
-                out = out.add_mixed(table[(scalar[byte_index] >> 4) as usize]);
-            }
-
-            out = double_n(out, 4);
-            for (table, scalar) in tables.iter().zip(scalars) {
-                out = out.add_mixed(table[(scalar[byte_index] & 0x0f) as usize]);
+        for i in (0..261).rev() {
+            out = out.double();
+            for (table, naf) in tables.iter().zip(&nafs) {
+                let digit = naf[i];
+                if digit > 0 {
+                    out = out.add_mixed(table[(digit >> 1) as usize]);
+                } else if digit < 0 {
+                    out = out.add_mixed(-table[((-digit) >> 1) as usize]);
+                }
             }
         }
 
