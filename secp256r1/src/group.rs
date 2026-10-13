@@ -552,24 +552,25 @@ impl ProjectivePoint {
         }
 
         // Odd multiples P, 3P, ..., 15P per point for width-5 signed NAFs.
-        let tables: Vec<_> = points
-            .iter()
-            .map(|point| {
-                let base = Self::from_affine(*point);
-                let base2 = base.double();
-                let mut table = [base; 8];
-                for i in 1..8 {
-                    table[i] = table[i - 1] + base2;
-                }
-                batch_normalize(table)
-            })
-            .collect();
+        // All tables share a single field inversion.
+        let mut projective = Vec::with_capacity(points.len() * 8);
+        for point in points {
+            let base = Self::from_affine(*point);
+            let base2 = base.double();
+            let mut entry = base;
+            projective.push(entry);
+            for _ in 1..8 {
+                entry = entry + base2;
+                projective.push(entry);
+            }
+        }
+        let affine = batch_normalize_slice(&projective);
         let nafs: Vec<_> = scalars.iter().map(wnaf5).collect();
         let mut out = Self::IDENTITY;
 
         for i in (0..261).rev() {
             out = out.double();
-            for (table, naf) in tables.iter().zip(&nafs) {
+            for (table, naf) in affine.chunks_exact(8).zip(&nafs) {
                 let digit = naf[i];
                 if digit > 0 {
                     out = out.add_mixed(table[(digit >> 1) as usize]);
@@ -722,6 +723,41 @@ fn window4_table(base: AffinePoint) -> [AffinePoint; SHAMIR_WINDOW_POINTS] {
     }
 
     batch_normalize(projective)
+}
+
+fn batch_normalize_slice(points: &[ProjectivePoint]) -> Vec<AffinePoint> {
+    let mut products = vec![FieldElement::ONE; points.len()];
+    let mut acc = FieldElement::ONE;
+
+    for (product, point) in products.iter_mut().zip(points) {
+        *product = acc;
+        if !point.is_identity() {
+            acc = acc * point.z;
+        }
+    }
+
+    let mut out = vec![AffinePoint::IDENTITY; points.len()];
+    let Some(mut acc_inverse) = acc.invert() else {
+        return out;
+    };
+
+    for i in (0..points.len()).rev() {
+        let point = points[i];
+        if point.is_identity() {
+            continue;
+        }
+
+        let z_inverse = acc_inverse * products[i];
+        acc_inverse = acc_inverse * point.z;
+        let z_inverse2 = z_inverse.square();
+        out[i] = AffinePoint {
+            x: point.x * z_inverse2,
+            y: point.y * z_inverse2 * z_inverse,
+            infinity: false,
+        };
+    }
+
+    out
 }
 
 fn batch_normalize<const N: usize>(points: [ProjectivePoint; N]) -> [AffinePoint; N] {
