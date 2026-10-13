@@ -104,10 +104,9 @@ impl Scalar {
             return None;
         }
 
-        let inverse = invert_canonical(from_montgomery(self.limbs));
-
+        // Seeding the cofactor with R^2 maps (aR)^-1 directly to a^-1 R.
         Some(Self {
-            limbs: montgomery_mul(inverse, R2),
+            limbs: invert_canonical(self.limbs, R2),
         })
     }
 
@@ -170,40 +169,50 @@ impl Neg for Scalar {
 }
 
 /// Inverts a nonzero canonical integer modulo n with the binary extended
-/// Euclidean algorithm. The result is canonical.
+/// Euclidean algorithm, returning `seed * a^-1 mod n`. The result is
+/// canonical when `seed` is.
 #[inline]
-fn invert_canonical(a: [u64; 4]) -> [u64; 4] {
+fn invert_canonical(a: [u64; 4], seed: [u64; 4]) -> [u64; 4] {
     const ONE: [u64; 4] = [1, 0, 0, 0];
 
     let mut u = a;
     let mut v = MODULUS;
-    let mut x1 = ONE;
+    let mut x1 = seed;
     let mut x2 = [0u64; 4];
 
-    while u != ONE && v != ONE {
-        while u[0] & 1 == 0 {
-            u = shr1(u, 0);
-            x1 = half_mod(x1);
-        }
-        while v[0] & 1 == 0 {
-            v = shr1(v, 0);
-            x2 = half_mod(x2);
-        }
+    while u[0] & 1 == 0 {
+        u = shr1(u, 0);
+        x1 = half_mod(x1);
+    }
+    if u == ONE {
+        return x1;
+    }
 
+    // u and v are both odd here, so each difference is even and only the
+    // operand that was just reduced needs its factors of two removed.
+    loop {
         let (difference, borrow) = sub_limbs(u, v);
         if borrow == 0 {
             u = difference;
             x1 = sub_mod(x1, x2);
+            while u[0] & 1 == 0 {
+                u = shr1(u, 0);
+                x1 = half_mod(x1);
+            }
+            if u == ONE {
+                return x1;
+            }
         } else {
             v = sub_limbs(v, u).0;
             x2 = sub_mod(x2, x1);
+            while v[0] & 1 == 0 {
+                v = shr1(v, 0);
+                x2 = half_mod(x2);
+            }
+            if v == ONE {
+                return x2;
+            }
         }
-    }
-
-    if u == ONE {
-        x1
-    } else {
-        x2
     }
 }
 
