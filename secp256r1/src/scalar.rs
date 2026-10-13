@@ -31,12 +31,6 @@ const R2: [u64; 4] = [
     0x66e1_2d94_f3d9_5620,
 ];
 
-const MODULUS_MINUS_TWO: [u8; 32] = [
-    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x4f,
-];
-const INVERT_WINDOW: usize = 5;
-const INVERT_TABLE_POINTS: usize = 1 << (INVERT_WINDOW - 1);
 
 impl Scalar {
     pub const ZERO: Self = Self { limbs: [0; 4] };
@@ -110,32 +104,11 @@ impl Scalar {
             return None;
         }
 
-        let table = odd_powers(self);
+        let inverse = invert_canonical(from_montgomery(self.limbs));
 
-        // The upper 128 bits of n - 2 are ffffffff 00000000 ffffffff ffffffff,
-        // so they are built from x^(2^32 - 1) with a fixed chain.
-        let x5 = table[15];
-        let x10 = x5.square_n(5) * x5;
-        let x20 = x10.square_n(10) * x10;
-        let x30 = x20.square_n(10) * x10;
-        let x32 = x30.square_n(2) * table[1];
-        let mut out = x32.square_n(64) * x32;
-        out = out.square_n(32) * x32;
-
-        for &(squarings, index) in &INVERT_LOW_STEPS.0[..INVERT_LOW_STEPS.1] {
-            out = out.square_n(squarings as usize) * table[index as usize];
-        }
-
-        Some(out)
-    }
-
-    #[inline]
-    fn square_n(self, n: usize) -> Self {
-        let mut out = self;
-        for _ in 0..n {
-            out = out.square();
-        }
-        out
+        Some(Self {
+            limbs: montgomery_mul(inverse, R2),
+        })
     }
 
     #[inline]
@@ -196,67 +169,72 @@ impl Neg for Scalar {
     }
 }
 
+/// Inverts a nonzero canonical integer modulo n with the binary extended
+/// Euclidean algorithm. The result is canonical.
 #[inline]
-fn odd_powers(value: Scalar) -> [Scalar; INVERT_TABLE_POINTS] {
-    let mut table = [Scalar::ZERO; INVERT_TABLE_POINTS];
-    table[0] = value;
+fn invert_canonical(a: [u64; 4]) -> [u64; 4] {
+    const ONE: [u64; 4] = [1, 0, 0, 0];
 
-    let value_squared = value.square();
-    for i in 1..INVERT_TABLE_POINTS {
-        table[i] = table[i - 1] * value_squared;
+    let mut u = a;
+    let mut v = MODULUS;
+    let mut x1 = ONE;
+    let mut x2 = [0u64; 4];
+
+    while u != ONE && v != ONE {
+        while u[0] & 1 == 0 {
+            u = shr1(u, 0);
+            x1 = half_mod(x1);
+        }
+        while v[0] & 1 == 0 {
+            v = shr1(v, 0);
+            x2 = half_mod(x2);
+        }
+
+        let (difference, borrow) = sub_limbs(u, v);
+        if borrow == 0 {
+            u = difference;
+            x1 = sub_mod(x1, x2);
+        } else {
+            v = sub_limbs(v, u).0;
+            x2 = sub_mod(x2, x1);
+        }
     }
 
-    table
+    if u == ONE {
+        x1
+    } else {
+        x2
+    }
 }
 
 #[inline(always)]
-const fn modulus_minus_two_bit(bit: usize) -> bool {
-    ((MODULUS_MINUS_TWO[31 - bit / 8] >> (bit % 8)) & 1) == 1
+fn shr1(a: [u64; 4], top: u64) -> [u64; 4] {
+    [
+        (a[0] >> 1) | (a[1] << 63),
+        (a[1] >> 1) | (a[2] << 63),
+        (a[2] >> 1) | (a[3] << 63),
+        (a[3] >> 1) | (top << 63),
+    ]
 }
 
-/// Sliding-window steps over the lower 128 bits of n - 2, as
-/// (squarings, odd-power table index) pairs, computed at compile time.
-const INVERT_LOW_STEPS: ([(u8, u8); 128], usize) = invert_low_steps();
-
-const fn invert_low_steps() -> ([(u8, u8); 128], usize) {
-    let mut steps = [(0u8, 0u8); 128];
-    let mut len = 0;
-    let mut zeros = 0usize;
-    let mut bit = 127isize;
-
-    while bit >= 0 {
-        if !modulus_minus_two_bit(bit as usize) {
-            zeros += 1;
-            bit -= 1;
-            continue;
-        }
-
-        let mut width = if INVERT_WINDOW < bit as usize + 1 {
-            INVERT_WINDOW
-        } else {
-            bit as usize + 1
-        };
-        while width > 1 && !modulus_minus_two_bit(bit as usize + 1 - width) {
-            width -= 1;
-        }
-
-        let low = bit as usize + 1 - width;
-        let mut value = 0usize;
-        let mut i = bit as usize + 1;
-        while i > low {
-            i -= 1;
-            value = (value << 1) | modulus_minus_two_bit(i) as usize;
-        }
-
-        steps[len] = ((zeros + width) as u8, (value >> 1) as u8);
-        len += 1;
-        zeros = 0;
-        bit -= width as isize;
+#[inline(always)]
+fn half_mod(a: [u64; 4]) -> [u64; 4] {
+    if a[0] & 1 == 0 {
+        shr1(a, 0)
+    } else {
+        let (sum, carry) = add_limbs(a, MODULUS);
+        shr1(sum, carry)
     }
+}
 
-    // n - 2 is odd, so the last window ends at bit 0.
-    assert!(zeros == 0);
-    (steps, len)
+#[inline(always)]
+fn sub_mod(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    let (difference, borrow) = sub_limbs(a, b);
+    if borrow == 0 {
+        difference
+    } else {
+        add_limbs(difference, MODULUS).0
+    }
 }
 
 #[inline(always)]
