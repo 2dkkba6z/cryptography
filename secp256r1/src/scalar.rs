@@ -111,8 +111,18 @@ impl Scalar {
         }
 
         let table = odd_powers(self);
-        let mut out = Self::ONE;
-        let mut bit = 255isize;
+
+        // The upper 128 bits of n - 2 are ffffffff 00000000 ffffffff ffffffff,
+        // so they are built from x^(2^32 - 1) with a fixed chain.
+        let x5 = table[15];
+        let x10 = x5.square_n(5) * x5;
+        let x20 = x10.square_n(10) * x10;
+        let x30 = x20.square_n(10) * x10;
+        let x32 = x30.square_n(2) * table[1];
+        let mut out = x32.square_n(64) * x32;
+        out = out.square_n(32) * x32;
+
+        let mut bit = 127isize;
 
         while bit >= 0 {
             if !modulus_minus_two_bit(bit as usize) {
@@ -140,6 +150,15 @@ impl Scalar {
         }
 
         Some(out)
+    }
+
+    #[inline]
+    fn square_n(self, n: usize) -> Self {
+        let mut out = self;
+        for _ in 0..n {
+            out = out.square();
+        }
+        out
     }
 
     #[inline]
