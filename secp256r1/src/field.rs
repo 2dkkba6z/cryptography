@@ -282,6 +282,31 @@ fn strip_twos_only(u: &mut [u64; 4]) -> u32 {
     removed
 }
 
+#[inline(always)]
+fn sub_limbs3(a: [u64; 3], b: [u64; 3]) -> ([u64; 3], u64) {
+    let (w0, borrow) = sbb(a[0], b[0], 0);
+    let (w1, borrow) = sbb(a[1], b[1], borrow);
+    let (w2, borrow) = sbb(a[2], b[2], borrow);
+    ([w0, w1, w2], borrow)
+}
+
+/// Removes all factors of two from the nonzero three-limb `u` and returns the
+/// number of bits removed.
+#[inline(always)]
+fn strip_twos3(u: &mut [u64; 3]) -> u32 {
+    let mut removed = 0;
+    while (u[0] & 1) == 0 {
+        let shift = u[0].trailing_zeros().min(63);
+        *u = [
+            (u[0] >> shift) | (u[1] << (64 - shift)),
+            (u[1] >> shift) | (u[2] << (64 - shift)),
+            u[2] >> shift,
+        ];
+        removed += shift;
+    }
+    removed
+}
+
 /// Records one inverse step on the cofactors in the matrix `m` (see
 /// `invert_canonical`): `r += s; s <<= shift` when `u_side`, otherwise
 /// `s += r; r <<= shift`. Here `shift >= 1`.
@@ -376,7 +401,41 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
 
     // u = p is never one; only the value updated in a step can become one.
     if !is_one_limbs(v) {
-        loop {
+        'outer: loop {
+            if (u[3] | v[3]) == 0 && (u[2] | v[2]) != 0 {
+                // Both fit in 192 bits: run the same steps on three limbs
+                // until both fit in 128 bits.
+                let mut u3 = [u[0], u[1], u[2]];
+                let mut v3 = [v[0], v[1], v[2]];
+                while (u3[2] | v3[2]) != 0 {
+                    let u_ge = if u3[2] != v3[2] {
+                        u3[2] > v3[2]
+                    } else {
+                        sub_limbs3(u3, v3).1 == 0
+                    };
+                    if u_ge {
+                        u3 = sub_limbs3(u3, v3).0;
+                        let shift = strip_twos3(&mut u3);
+                        cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, true);
+                        k += shift;
+                        if u3 == [1, 0, 0] {
+                            u = [1, 0, 0, 0];
+                            break 'outer;
+                        }
+                    } else {
+                        v3 = sub_limbs3(v3, u3).0;
+                        let shift = strip_twos3(&mut v3);
+                        cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, false);
+                        k += shift;
+                        if v3 == [1, 0, 0] {
+                            v = [1, 0, 0, 0];
+                            break 'outer;
+                        }
+                    }
+                }
+                u = [u3[0], u3[1], 0, 0];
+                v = [v3[0], v3[1], 0, 0];
+            }
             if (u[2] | u[3] | v[2] | v[3]) == 0 {
                 // Both fit in 128 bits: finish the same steps on native u128s.
                 let mut un = (u[0] as u128) | ((u[1] as u128) << 64);
@@ -435,9 +494,13 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
                 v = [vn as u64, (vn >> 64) as u64, 0, 0];
                 break;
             }
-            let (difference, borrow) = sub_limbs(u, v);
-            if borrow == 0 {
-                u = difference;
+            let u_ge = if u[3] != v[3] {
+                u[3] > v[3]
+            } else {
+                ge_limbs(u, v)
+            };
+            if u_ge {
+                u = sub_limbs(u, v).0;
                 let shift = strip_twos_only(&mut u);
                 cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, true);
                 k += shift;
