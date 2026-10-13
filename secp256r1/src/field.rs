@@ -28,11 +28,6 @@ const R2: [u64; 4] = [
     0x0000_0004_ffff_fffd,
 ];
 
-const P_PLUS_ONE_DIV_4: [u8; 32] = [
-    0x3f, 0xff, 0xff, 0xff, 0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
 impl FieldElement {
     pub const ZERO: Self = Self { limbs: [0; 4] };
     pub const ONE: Self = Self {
@@ -84,23 +79,22 @@ impl FieldElement {
 
     #[inline]
     pub(crate) fn sqrt(self) -> Option<Self> {
-        let candidate = self.pow(P_PLUS_ONE_DIV_4);
+        // (p + 1) / 4 = (2^32 - 1) * 2^222 + 2^190 + 2^94.
+        let x2 = self.square() * self;
+        let x4 = x2.square_n(2) * x2;
+        let x8 = x4.square_n(4) * x4;
+        let x16 = x8.square_n(8) * x8;
+        let x32 = x16.square_n(16) * x16;
+        let candidate = ((x32.square_n(32) * self).square_n(96) * self).square_n(94);
         (candidate.square() == self).then_some(candidate)
     }
 
     #[inline]
-    fn pow(self, exponent: [u8; 32]) -> Self {
-        let mut out = Self::ONE;
-
-        for byte in exponent {
-            for bit in (0..8).rev() {
-                out = out.square();
-                if ((byte >> bit) & 1) == 1 {
-                    out = out * self;
-                }
-            }
+    fn square_n(self, n: usize) -> Self {
+        let mut out = self;
+        for _ in 0..n {
+            out = out.square();
         }
-
         out
     }
 
