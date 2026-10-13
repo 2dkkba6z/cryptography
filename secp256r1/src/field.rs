@@ -249,6 +249,16 @@ fn shl_limbs(a: [u64; 4], shift: u32) -> [u64; 4] {
     ]
 }
 
+/// Shifts `a` left by `shift` bits, `1 <= shift <= 127`.
+#[inline(always)]
+fn shl_limbs_wide(mut a: [u64; 4], mut shift: u32) -> [u64; 4] {
+    while shift > 63 {
+        a = shl_limbs(a, 63);
+        shift -= 63;
+    }
+    shl_limbs(a, shift)
+}
+
 /// Removes all factors of two from `u`, multiplying `x` by
 /// the same power of two, and returns the number of bits removed.
 #[inline(always)]
@@ -288,6 +298,37 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
     // u = p is never one; only the value updated in a step can become one.
     if !is_one_limbs(v) {
         loop {
+            if (u[2] | u[3] | v[2] | v[3]) == 0 {
+                // Both fit in 128 bits: finish the same steps on native u128s.
+                let mut un = (u[0] as u128) | ((u[1] as u128) << 64);
+                let mut vn = (v[0] as u128) | ((v[1] as u128) << 64);
+                loop {
+                    if un >= vn {
+                        un -= vn;
+                        r = add_limbs(r, s).0;
+                        let shift = un.trailing_zeros();
+                        un >>= shift;
+                        s = shl_limbs_wide(s, shift);
+                        k += shift;
+                        if un == 1 {
+                            break;
+                        }
+                    } else {
+                        vn -= un;
+                        s = add_limbs(s, r).0;
+                        let shift = vn.trailing_zeros();
+                        vn >>= shift;
+                        r = shl_limbs_wide(r, shift);
+                        k += shift;
+                        if vn == 1 {
+                            break;
+                        }
+                    }
+                }
+                u = [un as u64, (un >> 64) as u64, 0, 0];
+                v = [vn as u64, (vn >> 64) as u64, 0, 0];
+                break;
+            }
             let (difference, borrow) = sub_limbs(u, v);
             if borrow == 0 {
                 u = difference;
