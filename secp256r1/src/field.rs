@@ -80,8 +80,18 @@ impl FieldElement {
             return None;
         }
 
+        // x * 2^(512 - k) / R = value^-1 * R.
+        let (x, k) = invert_canonical(from_montgomery(self.limbs));
+        let shift = 512 - k as usize;
+        let mut scale = [0; 4];
+        if shift == 256 {
+            scale = NEG_MODULUS;
+        } else {
+            scale[shift / 64] = 1 << (shift % 64);
+        }
+
         Some(Self {
-            limbs: montgomery_mul(invert_canonical(from_montgomery(self.limbs)), R2),
+            limbs: montgomery_mul(x, scale),
         })
     }
 
@@ -267,14 +277,13 @@ fn half_mod(a: [u64; 4]) -> [u64; 4] {
 }
 
 #[inline(always)]
-fn sub_mod(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    let (difference, borrow) = sub_limbs(a, b);
-
-    if borrow == 0 {
-        difference
-    } else {
-        add_limbs(difference, MODULUS).0
-    }
+fn shl1_limbs(a: [u64; 4]) -> [u64; 4] {
+    [
+        a[0] << 1,
+        (a[1] << 1) | (a[0] >> 63),
+        (a[2] << 1) | (a[1] >> 63),
+        (a[3] << 1) | (a[2] >> 63),
+    ]
 }
 
 /// Returns true iff the Jacobi symbol `(a / MODULUS)` is `-1`.
@@ -403,33 +412,55 @@ fn is_non_residue_u64(mut a: u64, mut n: u64, mut negate: bool) -> bool {
     n == 1 && negate
 }
 
-fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
-    let mut u = value;
-    let mut v = MODULUS;
-    let mut x1 = [1, 0, 0, 0];
-    let mut x2 = [0; 4];
+/// Kaliski's almost inverse of a nonzero canonical `value`: returns `(x, k)`
+/// with `x = value^-1 * 2^k mod p`, `x < p` and `256 <= k <= 512`.
+///
+/// The invariant `p = u * s + v * r` keeps `r` and `s` at most `p` until the
+/// final doubling, so no modular halving is needed inside the loop.
+fn invert_canonical(value: [u64; 4]) -> ([u64; 4], u32) {
+    let mut u = MODULUS;
+    let mut v = value;
+    let mut r = [0; 4];
+    let mut s = [1, 0, 0, 0];
+    let mut k = 0;
 
-    while !is_one_limbs(u) && !is_one_limbs(v) {
+    loop {
         while is_even_limbs(u) {
             u = shr1_limbs(u);
-            x1 = half_mod(x1);
+            s = shl1_limbs(s);
+            k += 1;
         }
 
         while is_even_limbs(v) {
             v = shr1_limbs(v);
-            x2 = half_mod(x2);
+            r = shl1_limbs(r);
+            k += 1;
         }
 
-        if ge_limbs(u, v) {
-            u = sub_limbs(u, v).0;
-            x1 = sub_mod(x1, x2);
+        k += 1;
+        let (difference, borrow) = sub_limbs(u, v);
+        if borrow != 0 {
+            v = shr1_limbs(sub_limbs(v, u).0);
+            s = add_limbs(r, s).0;
+            r = shl1_limbs(r);
+        } else if difference != [0; 4] {
+            u = shr1_limbs(difference);
+            r = add_limbs(r, s).0;
+            s = shl1_limbs(s);
         } else {
-            v = sub_limbs(v, u).0;
-            x2 = sub_mod(x2, x1);
+            break;
         }
     }
 
-    if is_one_limbs(u) { x1 } else { x2 }
+    // u = v = 1: the last step sets r = 2r, which may exceed 2^256.
+    let (doubled, carry) = add_limbs(r, r);
+    let reduced = if carry != 0 || ge_limbs(doubled, MODULUS) {
+        sub_limbs(doubled, MODULUS).0
+    } else {
+        doubled
+    };
+
+    (sub_limbs(MODULUS, reduced).0, k)
 }
 
 #[inline(always)]
