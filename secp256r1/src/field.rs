@@ -21,6 +21,14 @@ const MODULUS: [u64; 4] = [
     0xffff_ffff_0000_0001,
 ];
 
+/// `2^256 - MODULUS`; adding it carries out of 256 bits iff the input is at least `MODULUS`.
+const NEG_MODULUS: [u64; 4] = [
+    0x0000_0000_0000_0001,
+    0xffff_ffff_0000_0000,
+    0xffff_ffff_ffff_ffff,
+    0x0000_0000_ffff_fffe,
+];
+
 const R2: [u64; 4] = [
     0x0000_0000_0000_0003,
     0xffff_fffb_ffff_ffff,
@@ -192,9 +200,9 @@ fn sub_limbs(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
 
 #[inline(always)]
 fn reduce_sum(sum: [u64; 4], carry: u64) -> [u64; 4] {
-    let (reduced, borrow) = sub_limbs(sum, MODULUS);
+    let (reduced, overflow) = add_limbs(sum, NEG_MODULUS);
 
-    if carry != 0 || borrow == 0 {
+    if (carry | overflow) != 0 {
         reduced
     } else {
         sum
@@ -394,16 +402,13 @@ fn montgomery_reduce_words(
 
 #[inline(always)]
 fn reduce_wide(value: [u64; 5]) -> [u64; 4] {
-    let (w0, borrow) = sbb(value[0], MODULUS[0], 0);
-    let (w1, borrow) = sbb(value[1], MODULUS[1], borrow);
-    let (w2, borrow) = sbb(value[2], MODULUS[2], borrow);
-    let (w3, borrow) = sbb(value[3], MODULUS[3], borrow);
-    let (_, borrow) = sbb(value[4], 0, borrow);
+    let low = [value[0], value[1], value[2], value[3]];
+    let (reduced, carry) = add_limbs(low, NEG_MODULUS);
 
-    if borrow == 0 {
-        [w0, w1, w2, w3]
+    if (value[4] | carry) != 0 {
+        reduced
     } else {
-        [value[0], value[1], value[2], value[3]]
+        low
     }
 }
 
@@ -411,12 +416,6 @@ fn reduce_wide(value: [u64; 5]) -> [u64; 4] {
 fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
     let sum = (a as u128) + (b as u128) + (carry as u128);
     (sum as u64, (sum >> 64) as u64)
-}
-
-#[inline(always)]
-fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
-    let difference = (a as u128).wrapping_sub((b as u128) + (borrow as u128));
-    (difference as u64, u64::from((difference >> 127) != 0))
 }
 
 #[inline(always)]
