@@ -110,7 +110,27 @@ impl FieldElement {
         let x16 = x8.square_n(8) * x8;
         let x32 = x16.square_n(16) * x16;
         // The symbol is 0 or 1 here and p = 3 (mod 4), so this is a root.
-        Some(((x32.square_n(32) * self).square_n(96) * self).square_n(94))
+        let root = ((x32.square_n(32) * self).square_n(96) * self).square_n(94);
+        let [l0, l1, l2, l3] = root.limbs;
+        Some(Self {
+            limbs: reduce_wide([l0, l1, l2, l3, 0]),
+        })
+    }
+
+    /// Squares `n` times, keeping limbs below `2^256` but not necessarily
+    /// below `MODULUS`. `Mul` accepts such inputs; callers must canonicalize
+    /// the final result.
+    #[inline]
+    fn square_n(self, n: usize) -> Self {
+        let mut out = self.limbs;
+        for _ in 0..n {
+            let [r4, r5, r6, r7, r8] = montgomery_square_wide(out);
+            out = [r4, r5, r6, r7];
+            if r8 != 0 {
+                out = add_limbs(out, NEG_MODULUS).0;
+            }
+        }
+        Self { limbs: out }
     }
 
     /// Returns `self / 2`.
@@ -119,15 +139,6 @@ impl FieldElement {
         Self {
             limbs: half_mod(self.limbs),
         }
-    }
-
-    #[inline]
-    fn square_n(self, n: usize) -> Self {
-        let mut out = self;
-        for _ in 0..n {
-            out = out.square();
-        }
-        out
     }
 
     #[inline]
@@ -661,6 +672,13 @@ fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 
 #[inline(always)]
 fn montgomery_square(a: [u64; 4]) -> [u64; 4] {
+    reduce_wide(montgomery_square_wide(a))
+}
+
+/// Montgomery square of `a < 2^256` before the final conditional
+/// subtraction; the 5-limb result is below `2^256 + MODULUS`.
+#[inline(always)]
+fn montgomery_square_wide(a: [u64; 4]) -> [u64; 5] {
     // Off-diagonal products a_i * a_j for i < j.
     let (w1, carry) = mac(0, a[0], a[1], 0);
     let (w2, carry) = mac(0, a[0], a[2], carry);
@@ -690,7 +708,7 @@ fn montgomery_square(a: [u64; 4]) -> [u64; 4] {
     let (w6, carry) = mac(w6, a[3], a[3], carry);
     let (w7, _) = adc(w7, 0, carry);
 
-    montgomery_reduce_words(w0, w1, w2, w3, w4, w5, w6, w7)
+    montgomery_reduce_words_wide(w0, w1, w2, w3, w4, w5, w6, w7)
 }
 
 #[inline(always)]
@@ -717,6 +735,23 @@ fn montgomery_reduce_words(
     r6: u64,
     r7: u64,
 ) -> [u64; 4] {
+    reduce_wide(montgomery_reduce_words_wide(
+        r0, r1, r2, r3, r4, r5, r6, r7,
+    ))
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn montgomery_reduce_words_wide(
+    r0: u64,
+    r1: u64,
+    r2: u64,
+    r3: u64,
+    r4: u64,
+    r5: u64,
+    r6: u64,
+    r7: u64,
+) -> [u64; 5] {
     let (r1, carry) = mac(r1, r0, MODULUS[1], r0);
     let (r2, carry) = adc(r2, 0, carry);
     let (r3, carry) = mac(r3, r0, MODULUS[3], carry);
@@ -737,7 +772,7 @@ fn montgomery_reduce_words(
     let (r6, carry) = mac(r6, r3, MODULUS[3], carry);
     let (r7, r8) = adc(r7, carry2, carry);
 
-    reduce_wide([r4, r5, r6, r7, r8])
+    [r4, r5, r6, r7, r8]
 }
 
 #[inline(always)]
