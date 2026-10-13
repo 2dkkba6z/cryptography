@@ -212,46 +212,50 @@ fn add_signed62(a: Signed62, b: Signed62, sign: i64) -> Signed62 {
     out
 }
 
-/// Runs 62 divsteps on the low bits of `f` and `g`, returning the new delta
-/// and the transition matrix `[u, v, q, r]` scaled by `2^62`.
+/// Runs 62 variable-time divsteps on the low bits of `f` and `g` (with
+/// `eta = -delta`), returning the new eta and the transition matrix
+/// `[u, v, q, r]` scaled by `2^62`. Several steps are combined at once by
+/// choosing a multiple `w` of `f` that clears the low bits of `g`.
 #[inline(always)]
-fn divsteps_62(mut delta: i64, mut f: u64, mut g: u64) -> (i64, [i64; 4]) {
-    let (mut u, mut v, mut q, mut r) = (1i64, 0i64, 0i64, 1i64);
+fn divsteps_62(mut eta: i64, mut f: u64, mut g: u64) -> (i64, [i64; 4]) {
+    let (mut u, mut v, mut q, mut r) = (1u64, 0u64, 0u64, 1u64);
     let mut remaining = 62u32;
-    while remaining > 0 {
-        if g & 1 == 0 {
-            // A run of even steps only increments delta and shifts.
-            let zeros = g.trailing_zeros().min(remaining);
-            delta += zeros as i64;
-            g >>= zeros;
-            u <<= zeros;
-            v <<= zeros;
-            remaining -= zeros;
-            continue;
+    loop {
+        // A run of even steps only decrements eta and shifts.
+        let zeros = (g | (u64::MAX << remaining)).trailing_zeros();
+        g >>= zeros;
+        u <<= zeros;
+        v <<= zeros;
+        eta -= zeros as i64;
+        remaining -= zeros;
+        if remaining == 0 {
+            break;
         }
-        {
-            if delta > 0 {
-                delta = 1 - delta;
-                let (old_f, old_u, old_v) = (f, u, v);
-                f = g;
-                u = q;
-                v = r;
-                g = g.wrapping_sub(old_f);
-                q -= old_u;
-                r -= old_v;
-            } else {
-                delta += 1;
-                g = g.wrapping_add(f);
-                q += u;
-                r += v;
-            }
+        let w;
+        if eta < 0 {
+            eta = -eta;
+            (f, g) = (g, f.wrapping_neg());
+            (u, q) = (q, u.wrapping_neg());
+            (v, r) = (r, v.wrapping_neg());
+            let limit = (eta + 1).min(remaining as i64) as u32;
+            let m = (u64::MAX >> (64 - limit)) & 63;
+            // w = -g / f mod 2^6.
+            w = f
+                .wrapping_mul(g)
+                .wrapping_mul(f.wrapping_mul(f).wrapping_sub(2))
+                & m;
+        } else {
+            let limit = (eta + 1).min(remaining as i64) as u32;
+            let m = (u64::MAX >> (64 - limit)) & 15;
+            // w = -g / f mod 2^4.
+            let inv = f.wrapping_add((f.wrapping_add(1) & 4) << 1);
+            w = inv.wrapping_neg().wrapping_mul(g) & m;
         }
-        g >>= 1;
-        u <<= 1;
-        v <<= 1;
-        remaining -= 1;
+        g = g.wrapping_add(f.wrapping_mul(w));
+        q = q.wrapping_add(u.wrapping_mul(w));
+        r = r.wrapping_add(v.wrapping_mul(w));
     }
-    (delta, [u, v, q, r])
+    (eta, [u as i64, v as i64, q as i64, r as i64])
 }
 
 /// Applies the matrix to `f` and `g`, dividing exactly by `2^62`.
@@ -309,11 +313,11 @@ fn invert_canonical(a: [u64; 4]) -> [u64; 4] {
     let mut g = to_signed62(a);
     let mut d = [0i64; 5];
     let mut e = to_signed62(R2);
-    let mut delta = 1i64;
+    let mut eta = -1i64;
 
     loop {
-        let (next_delta, t) = divsteps_62(delta, f[0] as u64, g[0] as u64);
-        delta = next_delta;
+        let (next_eta, t) = divsteps_62(eta, f[0] as u64, g[0] as u64);
+        eta = next_eta;
         update_de(&mut d, &mut e, t);
         update_fg(&mut f, &mut g, t);
         if g == [0; 5] {
