@@ -284,12 +284,8 @@ fn is_non_residue(value: [u64; 4]) -> bool {
     let mut negate = false;
 
     while a != [0; 4] {
-        if (a[2] | a[3] | n[2] | n[3]) == 0 {
-            return is_non_residue_u128(
-                (u128::from(a[1]) << 64) | u128::from(a[0]),
-                (u128::from(n[1]) << 64) | u128::from(n[0]),
-                negate,
-            );
+        if (a[3] | n[3]) == 0 {
+            return is_non_residue_u192([a[0], a[1], a[2]], [n[0], n[1], n[2]], negate);
         }
         while a[0] == 0 {
             // Shifting by 64 bits keeps the symbol: 64 is even.
@@ -320,7 +316,49 @@ fn is_non_residue(value: [u64; 4]) -> bool {
     is_one_limbs(n) && negate
 }
 
-/// Tail of [`is_non_residue`] once both operands fit in 128 bits.
+/// Tail of [`is_non_residue`] once both operands fit in 192 bits.
+fn is_non_residue_u192(mut a: [u64; 3], mut n: [u64; 3], mut negate: bool) -> bool {
+    while a != [0; 3] {
+        if (a[2] | n[2]) == 0 {
+            return is_non_residue_u128(
+                (u128::from(a[1]) << 64) | u128::from(a[0]),
+                (u128::from(n[1]) << 64) | u128::from(n[0]),
+                negate,
+            );
+        }
+        while a[0] == 0 {
+            // Shifting by 64 bits keeps the symbol: 64 is even.
+            a = [a[1], a[2], 0];
+        }
+        let shift = a[0].trailing_zeros();
+        if shift != 0 {
+            if (shift & 1) == 1 && matches!(n[0] & 7, 3 | 5) {
+                negate = !negate;
+            }
+            a = [
+                (a[0] >> shift) | (a[1] << (64 - shift)),
+                (a[1] >> shift) | (a[2] << (64 - shift)),
+                a[2] >> shift,
+            ];
+        }
+
+        if (a[2], a[1], a[0]) < (n[2], n[1], n[0]) {
+            core::mem::swap(&mut a, &mut n);
+            if (a[0] & 3) == 3 && (n[0] & 3) == 3 {
+                negate = !negate;
+            }
+        }
+        let (w0, borrow) = a[0].overflowing_sub(n[0]);
+        let (w1, borrow1) = a[1].overflowing_sub(n[1]);
+        let (w1, borrow2) = w1.overflowing_sub(u64::from(borrow));
+        let w2 = a[2].wrapping_sub(n[2]).wrapping_sub(u64::from(borrow1 | borrow2));
+        a = [w0, w1, w2];
+    }
+
+    is_one_limbs([n[0], n[1], n[2], 0]) && negate
+}
+
+/// Tail of [`is_non_residue_u192`] once both operands fit in 128 bits.
 fn is_non_residue_u128(mut a: u128, mut n: u128, mut negate: bool) -> bool {
     while a != 0 {
         if ((a | n) >> 64) == 0 {
