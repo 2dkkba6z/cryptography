@@ -21,6 +21,14 @@ const MODULUS: [u64; 4] = [
     0xffff_ffff_0000_0001,
 ];
 
+/// `2^256 - p`.
+const MODULUS_COMPLEMENT: [u64; 4] = [
+    0x0000_0000_0000_0001,
+    0xffff_ffff_0000_0000,
+    0xffff_ffff_ffff_ffff,
+    0x0000_0000_ffff_fffe,
+];
+
 const R2: [u64; 4] = [
     0x0000_0000_0000_0003,
     0xffff_fffb_ffff_ffff,
@@ -126,9 +134,25 @@ impl Add for FieldElement {
 
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
-        let (sum, carry) = add_limbs(self.limbs, rhs.limbs);
+        let (a, b) = (self.limbs, rhs.limbs);
+        let (s0, carry) = adc(a[0], b[0], 0);
+        let (s1, carry) = adc(a[1], b[1], carry);
+        let (s2, carry) = adc(a[2], b[2], carry);
+        let (s3, carry) = adc(a[3], b[3], carry);
+
+        // Adding 2^256 - p carries out of 256 bits exactly when the sum is at
+        // least p, and its low 256 bits are then the sum minus p.
+        let (t0, high) = adc(s0, MODULUS_COMPLEMENT[0], 0);
+        let (t1, high) = adc(s1, MODULUS_COMPLEMENT[1], high);
+        let (t2, high) = adc(s2, MODULUS_COMPLEMENT[2], high);
+        let (t3, high) = adc(s3, MODULUS_COMPLEMENT[3], high);
+
         Self {
-            limbs: reduce_sum(sum, carry),
+            limbs: if (carry | high) != 0 {
+                [t0, t1, t2, t3]
+            } else {
+                [s0, s1, s2, s3]
+            },
         }
     }
 }
@@ -199,17 +223,6 @@ fn sub_limbs(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
     }
 
     (out, borrow)
-}
-
-#[inline(always)]
-fn reduce_sum(sum: [u64; 4], carry: u64) -> [u64; 4] {
-    let (reduced, borrow) = sub_limbs(sum, MODULUS);
-
-    if carry != 0 || borrow == 0 {
-        reduced
-    } else {
-        sum
-    }
 }
 
 #[inline(always)]
