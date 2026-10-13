@@ -356,14 +356,13 @@ impl ProjectivePoint {
             return Self::IDENTITY;
         }
 
-        let yy = self.y.square();
-        let yyyy = yy.square();
+        let yy2 = double(self.y.square());
         let zz = self.z.square();
-        let s = double(double(self.x * yy));
+        let s = double(self.x * yy2);
         let m = triple((self.x - zz) * (self.x + zz));
         let x = m.square() - double(s);
-        let y = m * (s - x) - double(double(double(yyyy)));
-        let z = (self.y + self.z).square() - yy - zz;
+        let y = m * (s - x) - double(yy2.square());
+        let z = double(self.y * self.z);
 
         Self { x, y, z }
     }
@@ -397,7 +396,7 @@ impl ProjectivePoint {
         let v = self.x * i;
         let x = slope_num.square() - j - double(v);
         let y = slope_num * (v - x) - double(self.y * j);
-        let z = (self.z + h).square() - z1z1 - hh;
+        let z = double(self.z * h);
 
         Self { x, y, z }
     }
@@ -605,7 +604,7 @@ impl Add for ProjectivePoint {
         let v = u1 * i;
         let x = slope_num.square() - j - double(v);
         let y = slope_num * (v - x) - double(s1 * j);
-        let z = ((self.z + rhs.z).square() - z1z1 - z2z2) * h;
+        let z = double(self.z * rhs.z) * h;
 
         Self { x, y, z }
     }
