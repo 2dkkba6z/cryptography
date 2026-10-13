@@ -17,7 +17,6 @@ use crate::{Endianness, field::FieldElement, scalar::Scalar};
 
 const BASE_WINDOWS: usize = 32;
 const BASE_WINDOW_POINTS: usize = 256;
-const SHAMIR_WINDOW_POINTS: usize = 16;
 
 const CURVE_B: FieldElement = FieldElement::from_montgomery_limbs([
     0xd89c_df62_29c4_bddf,
@@ -490,17 +489,17 @@ impl ProjectivePoint {
         point: AffinePoint,
         point_scalar: [u8; 32],
     ) -> Self {
-        let generator_table = generator_window4_table();
-        let point_table = window4_table(point);
+        // Odd multiples G, 3G, ..., 15G and P, 3P, ..., 15P for width-5
+        // signed NAFs of both scalars.
+        let generator_table = generator_odd_multiples_table();
+        let point_table = batch_normalize(odd_multiples(Self::from_affine(point)));
+        let generator_naf = wnaf5(&generator_scalar);
+        let point_naf = wnaf5(&point_scalar);
         let mut out = Self::IDENTITY;
 
-        for (&generator_byte, &point_byte) in generator_scalar.iter().zip(point_scalar.iter()) {
-            out = double_n(out, 4)
-                .add_mixed(generator_table[(generator_byte >> 4) as usize])
-                .add_mixed(point_table[(point_byte >> 4) as usize]);
-            out = double_n(out, 4)
-                .add_mixed(generator_table[(generator_byte & 0x0f) as usize])
-                .add_mixed(point_table[(point_byte & 0x0f) as usize]);
+        for i in (0..261).rev() {
+            out = add_naf_digit(out.double(), generator_table, generator_naf[i]);
+            out = add_naf_digit(out, &point_table, point_naf[i]);
         }
 
         out
@@ -745,20 +744,26 @@ fn generator_window8_table() -> &'static [[AffinePoint; BASE_WINDOW_POINTS]; BAS
         .as_ref()
 }
 
-fn generator_window4_table() -> &'static [AffinePoint; SHAMIR_WINDOW_POINTS] {
-    static TABLE: OnceLock<[AffinePoint; SHAMIR_WINDOW_POINTS]> = OnceLock::new();
+fn generator_odd_multiples_table() -> &'static [AffinePoint; 8] {
+    static TABLE: OnceLock<[AffinePoint; 8]> = OnceLock::new();
 
-    TABLE.get_or_init(|| window4_table(AffinePoint::GENERATOR))
+    TABLE.get_or_init(|| batch_normalize(odd_multiples(ProjectivePoint::GENERATOR)))
 }
 
-fn window4_table(base: AffinePoint) -> [AffinePoint; SHAMIR_WINDOW_POINTS] {
-    let mut projective = [ProjectivePoint::IDENTITY; SHAMIR_WINDOW_POINTS];
-
-    for i in 1..SHAMIR_WINDOW_POINTS {
-        projective[i] = projective[i - 1].add_mixed(base);
+/// Adds the odd multiple selected by a signed NAF digit, if any.
+#[inline]
+fn add_naf_digit(
+    point: ProjectivePoint,
+    table: &[AffinePoint; 8],
+    digit: i8,
+) -> ProjectivePoint {
+    if digit > 0 {
+        point.add_mixed(table[(digit >> 1) as usize])
+    } else if digit < 0 {
+        point.add_mixed(-table[((-digit) >> 1) as usize])
+    } else {
+        point
     }
-
-    batch_normalize(projective)
 }
 
 fn batch_normalize_slice(points: &[ProjectivePoint]) -> Vec<AffinePoint> {
@@ -831,14 +836,6 @@ fn batch_normalize<const N: usize>(points: [ProjectivePoint; N]) -> [AffinePoint
     out
 }
 
-#[inline]
-fn double_n(mut point: ProjectivePoint, count: usize) -> ProjectivePoint {
-    for _ in 0..count {
-        point = point.double();
-    }
-
-    point
-}
 
 fn build_window8_table(
     mut base: ProjectivePoint,
