@@ -122,31 +122,8 @@ impl Scalar {
         let mut out = x32.square_n(64) * x32;
         out = out.square_n(32) * x32;
 
-        let mut bit = 127isize;
-
-        while bit >= 0 {
-            if !modulus_minus_two_bit(bit as usize) {
-                out = out.square();
-                bit -= 1;
-                continue;
-            }
-
-            let mut width = INVERT_WINDOW.min(bit as usize + 1);
-            while width > 1 && !modulus_minus_two_bit(bit as usize + 1 - width) {
-                width -= 1;
-            }
-
-            let low = bit as usize + 1 - width;
-            let mut value = 0usize;
-            for i in (low..=bit as usize).rev() {
-                value = (value << 1) | usize::from(modulus_minus_two_bit(i));
-            }
-
-            for _ in 0..width {
-                out = out.square();
-            }
-            out = out * table[value >> 1];
-            bit -= width as isize;
+        for &(squarings, index) in &INVERT_LOW_STEPS.0[..INVERT_LOW_STEPS.1] {
+            out = out.square_n(squarings as usize) * table[index as usize];
         }
 
         Some(out)
@@ -233,8 +210,53 @@ fn odd_powers(value: Scalar) -> [Scalar; INVERT_TABLE_POINTS] {
 }
 
 #[inline(always)]
-fn modulus_minus_two_bit(bit: usize) -> bool {
+const fn modulus_minus_two_bit(bit: usize) -> bool {
     ((MODULUS_MINUS_TWO[31 - bit / 8] >> (bit % 8)) & 1) == 1
+}
+
+/// Sliding-window steps over the lower 128 bits of n - 2, as
+/// (squarings, odd-power table index) pairs, computed at compile time.
+const INVERT_LOW_STEPS: ([(u8, u8); 128], usize) = invert_low_steps();
+
+const fn invert_low_steps() -> ([(u8, u8); 128], usize) {
+    let mut steps = [(0u8, 0u8); 128];
+    let mut len = 0;
+    let mut zeros = 0usize;
+    let mut bit = 127isize;
+
+    while bit >= 0 {
+        if !modulus_minus_two_bit(bit as usize) {
+            zeros += 1;
+            bit -= 1;
+            continue;
+        }
+
+        let mut width = if INVERT_WINDOW < bit as usize + 1 {
+            INVERT_WINDOW
+        } else {
+            bit as usize + 1
+        };
+        while width > 1 && !modulus_minus_two_bit(bit as usize + 1 - width) {
+            width -= 1;
+        }
+
+        let low = bit as usize + 1 - width;
+        let mut value = 0usize;
+        let mut i = bit as usize + 1;
+        while i > low {
+            i -= 1;
+            value = (value << 1) | modulus_minus_two_bit(i) as usize;
+        }
+
+        steps[len] = ((zeros + width) as u8, (value >> 1) as u8);
+        len += 1;
+        zeros = 0;
+        bit -= width as isize;
+    }
+
+    // n - 2 is odd, so the last window ends at bit 0.
+    assert!(zeros == 0);
+    (steps, len)
 }
 
 #[inline(always)]
