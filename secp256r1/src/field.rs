@@ -87,6 +87,12 @@ impl FieldElement {
 
     #[inline]
     pub(crate) fn sqrt(self) -> Option<Self> {
+        // Montgomery form scales by R = 2^256, a square, so the Jacobi
+        // symbol of the stored limbs equals that of the element.
+        if is_non_residue(self.limbs) {
+            return None;
+        }
+
         // (p + 1) / 4 = (2^32 - 1) * 2^222 + 2^190 + 2^94.
         let x2 = self.square() * self;
         let x4 = x2.square_n(2) * x2;
@@ -261,6 +267,42 @@ fn sub_mod(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
     } else {
         add_limbs(difference, MODULUS).0
     }
+}
+
+/// Returns true iff the Jacobi symbol `(a / MODULUS)` is `-1`.
+fn is_non_residue(value: [u64; 4]) -> bool {
+    let mut a = value;
+    let mut n = MODULUS;
+    let mut negate = false;
+
+    while a != [0; 4] {
+        while a[0] == 0 {
+            // Shifting by 64 bits keeps the symbol: 64 is even.
+            a = [a[1], a[2], a[3], 0];
+        }
+        let shift = a[0].trailing_zeros();
+        if shift != 0 {
+            if (shift & 1) == 1 && matches!(n[0] & 7, 3 | 5) {
+                negate = !negate;
+            }
+            a = [
+                (a[0] >> shift) | (a[1] << (64 - shift)),
+                (a[1] >> shift) | (a[2] << (64 - shift)),
+                (a[2] >> shift) | (a[3] << (64 - shift)),
+                a[3] >> shift,
+            ];
+        }
+
+        if !ge_limbs(a, n) {
+            core::mem::swap(&mut a, &mut n);
+            if (a[0] & 3) == 3 && (n[0] & 3) == 3 {
+                negate = !negate;
+            }
+        }
+        a = sub_limbs(a, n).0;
+    }
+
+    is_one_limbs(n) && negate
 }
 
 fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
