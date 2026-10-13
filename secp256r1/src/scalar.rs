@@ -147,10 +147,13 @@ impl Sub for Scalar {
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         let (difference, borrow) = sub_limbs(self.limbs, rhs.limbs);
-        let (corrected, _) = add_limbs(difference, MODULUS);
 
         Self {
-            limbs: if borrow == 0 { difference } else { corrected },
+            limbs: if borrow == 0 {
+                difference
+            } else {
+                add_limbs(difference, MODULUS).0
+            },
         }
     }
 }
@@ -382,6 +385,11 @@ fn sub_limbs(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
 
 #[inline(always)]
 fn reduce_sum(sum: [u64; 4], carry: u64) -> [u64; 4] {
+    // Without a carry, a top limb below the modulus' top limb means sum < n.
+    if carry == 0 && sum[3] < MODULUS[3] {
+        return sum;
+    }
+
     let (reduced, wrapped) = add_limbs(sum, MODULUS_COMPLEMENT);
 
     if (carry | wrapped) != 0 {
@@ -526,28 +534,28 @@ fn montgomery_reduce_words(
     r7: u64,
 ) -> [u64; 4] {
     let k = r0.wrapping_mul(MODULUS_INV);
-    let (_, carry) = mac(r0, k, MODULUS[0], 0);
+    let carry = low_word_carry(r0, k);
     let (r1, carry) = mac(r1, k, MODULUS[1], carry);
     let (r2, carry) = mac(r2, k, MODULUS[2], carry);
     let (r3, carry) = mac(r3, k, MODULUS[3], carry);
     let (r4, carry2) = adc(r4, 0, carry);
 
     let k = r1.wrapping_mul(MODULUS_INV);
-    let (_, carry) = mac(r1, k, MODULUS[0], 0);
+    let carry = low_word_carry(r1, k);
     let (r2, carry) = mac(r2, k, MODULUS[1], carry);
     let (r3, carry) = mac(r3, k, MODULUS[2], carry);
     let (r4, carry) = mac(r4, k, MODULUS[3], carry);
     let (r5, carry2) = adc(r5, carry2, carry);
 
     let k = r2.wrapping_mul(MODULUS_INV);
-    let (_, carry) = mac(r2, k, MODULUS[0], 0);
+    let carry = low_word_carry(r2, k);
     let (r3, carry) = mac(r3, k, MODULUS[1], carry);
     let (r4, carry) = mac(r4, k, MODULUS[2], carry);
     let (r5, carry) = mac(r5, k, MODULUS[3], carry);
     let (r6, carry2) = adc(r6, carry2, carry);
 
     let k = r3.wrapping_mul(MODULUS_INV);
-    let (_, carry) = mac(r3, k, MODULUS[0], 0);
+    let carry = low_word_carry(r3, k);
     let (r4, carry) = mac(r4, k, MODULUS[1], carry);
     let (r5, carry) = mac(r5, k, MODULUS[2], carry);
     let (r6, carry) = mac(r6, k, MODULUS[3], carry);
@@ -556,8 +564,22 @@ fn montgomery_reduce_words(
     reduce_wide([r4, r5, r6, r7, r8])
 }
 
+/// Returns the carry out of `r + k * MODULUS[0]`, whose low word is zero by
+/// the choice of `k`: the low product word is `0` when `r == 0` and `2^64 - r`
+/// otherwise.
+#[inline(always)]
+fn low_word_carry(r: u64, k: u64) -> u64 {
+    (((k as u128) * (MODULUS[0] as u128)) >> 64) as u64 + u64::from(r != 0)
+}
+
 #[inline(always)]
 fn reduce_wide(value: [u64; 5]) -> [u64; 4] {
+    // A zero top limb and a fourth limb below the modulus' top limb mean
+    // value < n.
+    if value[4] == 0 && value[3] < MODULUS[3] {
+        return [value[0], value[1], value[2], value[3]];
+    }
+
     // Adding 2^256 - n carries out of 256 bits exactly when the low limbs are
     // at least n; together with the top limb this decides value >= n.
     let (w0, carry) = adc(value[0], MODULUS_COMPLEMENT[0], 0);
