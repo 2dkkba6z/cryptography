@@ -419,13 +419,7 @@ impl ProjectivePoint {
     #[inline]
     pub fn mul_scalar_vartime_unchecked(self, scalar: [u8; 32]) -> Self {
         // Odd multiples P, 3P, ..., 15P for a width-5 signed NAF.
-        let mut table = [self; 8];
-        let self2 = self.double();
-
-        for i in 1..8 {
-            table[i] = table[i - 1] + self2;
-        }
-        let affine_table = batch_normalize(table);
+        let affine_table = batch_normalize(odd_multiples(self));
 
         let naf = wnaf5(&scalar);
         let mut out = Self::IDENTITY;
@@ -551,19 +545,18 @@ impl ProjectivePoint {
         }
 
         // Odd multiples P, 3P, ..., 15P per point for width-5 signed NAFs.
-        // All tables share a single field inversion.
-        let mut projective = Vec::with_capacity(points.len() * 8);
+        // All tables share a single field inversion; P itself is already
+        // affine and is not normalized again.
+        let mut projective = Vec::with_capacity(points.len() * 7);
         for point in points {
-            let base = Self::from_affine(*point);
-            let base2 = base.double();
-            let mut entry = base;
-            projective.push(entry);
-            for _ in 1..8 {
-                entry = entry + base2;
-                projective.push(entry);
-            }
+            projective.extend_from_slice(&odd_multiples(Self::from_affine(*point))[1..]);
         }
-        let affine = batch_normalize_slice(&projective);
+        let normalized = batch_normalize_slice(&projective);
+        let mut affine = Vec::with_capacity(points.len() * 8);
+        for (point, multiples) in points.iter().zip(normalized.chunks_exact(7)) {
+            affine.push(*point);
+            affine.extend_from_slice(multiples);
+        }
         let nafs: Vec<_> = scalars.iter().map(wnaf5).collect();
         let mut out = Self::IDENTITY;
 
@@ -648,6 +641,48 @@ impl Neg for ProjectivePoint {
 #[inline]
 fn double(x: FieldElement) -> FieldElement {
     x + x
+}
+
+/// Odd multiples P, 3P, ..., 15P in Jacobian coordinates.
+///
+/// The addition formulas do not depend on the curve coefficient `a`, so the
+/// additions of 2P are carried out on the isomorphic curve where 2P has
+/// `Z = 1`, using mixed additions. Results are mapped back by multiplying
+/// their `Z` by the `Z` of 2P.
+#[inline]
+fn odd_multiples(base: ProjectivePoint) -> [ProjectivePoint; 8] {
+    let base2 = base.double();
+    let mut table = [base; 8];
+
+    if base2.is_identity() {
+        for i in 1..8 {
+            table[i] = table[i - 1] + base2;
+        }
+        return table;
+    }
+
+    let zz = base2.z.square();
+    let step = AffinePoint {
+        x: base2.x,
+        y: base2.y,
+        infinity: false,
+    };
+    let mut entry = ProjectivePoint {
+        x: base.x * zz,
+        y: base.y * (zz * base2.z),
+        z: base.z,
+    };
+
+    for item in table.iter_mut().skip(1) {
+        entry = entry.add_mixed(step);
+        *item = ProjectivePoint {
+            x: entry.x,
+            y: entry.y,
+            z: entry.z * base2.z,
+        };
+    }
+
+    table
 }
 
 /// Width-5 non-adjacent form of a big-endian 256-bit integer, least
