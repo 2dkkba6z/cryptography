@@ -22,6 +22,14 @@ const MODULUS: [u64; 4] = [
     0xffff_ffff_0000_0000,
 ];
 
+/// 2^256 - n.
+const MODULUS_COMPLEMENT: [u64; 4] = [
+    MODULUS[0].wrapping_neg(),
+    !MODULUS[1],
+    !MODULUS[2],
+    !MODULUS[3],
+];
+
 const MODULUS_INV: u64 = 0xccd1_c8aa_ee00_bc4f;
 
 const R2: [u64; 4] = [
@@ -374,9 +382,9 @@ fn sub_limbs(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
 
 #[inline(always)]
 fn reduce_sum(sum: [u64; 4], carry: u64) -> [u64; 4] {
-    let (reduced, borrow) = sub_limbs(sum, MODULUS);
+    let (reduced, wrapped) = add_limbs(sum, MODULUS_COMPLEMENT);
 
-    if carry != 0 || borrow == 0 {
+    if (carry | wrapped) != 0 {
         reduced
     } else {
         sum
@@ -550,13 +558,14 @@ fn montgomery_reduce_words(
 
 #[inline(always)]
 fn reduce_wide(value: [u64; 5]) -> [u64; 4] {
-    let (w0, borrow) = sbb(value[0], MODULUS[0], 0);
-    let (w1, borrow) = sbb(value[1], MODULUS[1], borrow);
-    let (w2, borrow) = sbb(value[2], MODULUS[2], borrow);
-    let (w3, borrow) = sbb(value[3], MODULUS[3], borrow);
-    let (_, borrow) = sbb(value[4], 0, borrow);
+    // Adding 2^256 - n carries out of 256 bits exactly when the low limbs are
+    // at least n; together with the top limb this decides value >= n.
+    let (w0, carry) = adc(value[0], MODULUS_COMPLEMENT[0], 0);
+    let (w1, carry) = adc(value[1], MODULUS_COMPLEMENT[1], carry);
+    let (w2, carry) = adc(value[2], MODULUS_COMPLEMENT[2], carry);
+    let (w3, carry) = adc(value[3], MODULUS_COMPLEMENT[3], carry);
 
-    if borrow == 0 {
+    if (carry | value[4]) != 0 {
         [w0, w1, w2, w3]
     } else {
         [value[0], value[1], value[2], value[3]]
