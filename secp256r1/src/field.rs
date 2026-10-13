@@ -285,16 +285,25 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
     let mut s = [1, 0, 0, 0];
     let mut k = strip_twos(&mut v, &mut r);
 
-    while !is_one_limbs(u) && !is_one_limbs(v) {
-        let (difference, borrow) = sub_limbs(u, v);
-        if borrow == 0 {
-            u = difference;
-            r = add_limbs(r, s).0;
-            k += strip_twos(&mut u, &mut s);
-        } else {
-            v = sub_limbs([0; 4], difference).0;
-            s = add_limbs(s, r).0;
-            k += strip_twos(&mut v, &mut r);
+    // u = p is never one; only the value updated in a step can become one.
+    if !is_one_limbs(v) {
+        loop {
+            let (difference, borrow) = sub_limbs(u, v);
+            if borrow == 0 {
+                u = difference;
+                r = add_limbs(r, s).0;
+                k += strip_twos(&mut u, &mut s);
+                if is_one_limbs(u) {
+                    break;
+                }
+            } else {
+                v = sub_limbs(v, u).0;
+                s = add_limbs(s, r).0;
+                k += strip_twos(&mut v, &mut r);
+                if is_one_limbs(v) {
+                    break;
+                }
+            }
         }
     }
 
