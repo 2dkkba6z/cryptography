@@ -382,6 +382,35 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
                 let mut un = (u[0] as u128) | ((u[1] as u128) << 64);
                 let mut vn = (v[0] as u128) | ((v[1] as u128) << 64);
                 loop {
+                    if ((un | vn) >> 64) == 0 {
+                        // Both fit in 64 bits: finish on native u64s.
+                        let mut uw = un as u64;
+                        let mut vw = vn as u64;
+                        loop {
+                            if uw >= vw {
+                                uw -= vw;
+                                let shift = uw.trailing_zeros();
+                                uw >>= shift;
+                                cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, true);
+                                k += shift;
+                                if uw == 1 {
+                                    break;
+                                }
+                            } else {
+                                vw -= uw;
+                                let shift = vw.trailing_zeros();
+                                vw >>= shift;
+                                cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, false);
+                                k += shift;
+                                if vw == 1 {
+                                    break;
+                                }
+                            }
+                        }
+                        un = uw as u128;
+                        vn = vw as u128;
+                        break;
+                    }
                     if un >= vn {
                         un -= vn;
                         let shift = un.trailing_zeros();
