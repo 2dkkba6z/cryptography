@@ -263,14 +263,64 @@ fn shl_limbs_wide(mut a: [u64; 4], mut shift: u32) -> [u64; 4] {
 /// the same power of two, and returns the number of bits removed.
 #[inline(always)]
 fn strip_twos(u: &mut [u64; 4], x: &mut [u64; 4]) -> u32 {
+    let removed = strip_twos_only(u);
+    if removed > 0 {
+        *x = shl_limbs_wide(*x, removed);
+    }
+    removed
+}
+
+/// Removes all factors of two from `u` and returns the number of bits removed.
+#[inline(always)]
+fn strip_twos_only(u: &mut [u64; 4]) -> u32 {
     let mut removed = 0;
     while is_even_limbs(*u) {
         let shift = u[0].trailing_zeros().min(63);
         *u = shr_limbs(*u, shift);
-        *x = shl_limbs(*x, shift);
         removed += shift;
     }
     removed
+}
+
+/// Records one inverse step on the cofactors in the matrix `m` (see
+/// `invert_canonical`): `r += s; s <<= shift` when `u_side`, otherwise
+/// `s += r; r <<= shift`. Here `shift >= 1`.
+#[inline(always)]
+fn cofactor_step(
+    m: &mut [u64; 4],
+    bits: &mut u32,
+    r: &mut [u64; 4],
+    s: &mut [u64; 4],
+    shift: u32,
+    u_side: bool,
+) {
+    if *bits + shift > 63 {
+        (*r, *s) = apply_matrix(*m, *r, *s);
+        *m = [1, 0, 0, 1];
+        *bits = 0;
+    }
+    if shift > 63 {
+        if u_side {
+            *r = add_limbs(*r, *s).0;
+            *s = shl_limbs_wide(*s, shift);
+        } else {
+            *s = add_limbs(*s, *r).0;
+            *r = shl_limbs_wide(*r, shift);
+        }
+    } else {
+        if u_side {
+            m[0] += m[2];
+            m[1] += m[3];
+            m[2] <<= shift;
+            m[3] <<= shift;
+        } else {
+            m[2] += m[0];
+            m[3] += m[1];
+            m[0] <<= shift;
+            m[1] <<= shift;
+        }
+        *bits += shift;
+    }
 }
 
 /// Returns `x * a + y * b` modulo 2^256.
@@ -318,6 +368,12 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
     let mut s = [1, 0, 0, 0];
     let mut k = strip_twos(&mut v, &mut r);
 
+    // The r and s updates are collected in a matrix m, with
+    // r = m[0] * r + m[1] * s and s = m[2] * r + m[3] * s. Its
+    // entries are at most 2^bits, so bits <= 63 keeps them in u64.
+    let mut m = [1u64, 0, 0, 1];
+    let mut bits = 0u32;
+
     // u = p is never one; only the value updated in a step can become one.
     if !is_one_limbs(v) {
         loop {
@@ -325,31 +381,12 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
                 // Both fit in 128 bits: finish the same steps on native u128s.
                 let mut un = (u[0] as u128) | ((u[1] as u128) << 64);
                 let mut vn = (v[0] as u128) | ((v[1] as u128) << 64);
-                // The r and s updates are collected in a matrix m, with
-                // r = m[0] * r + m[1] * s and s = m[2] * r + m[3] * s. Its
-                // entries are at most 2^bits, so bits <= 63 keeps them in u64.
-                let mut m = [1u64, 0, 0, 1];
-                let mut bits = 0u32;
                 loop {
                     if un >= vn {
                         un -= vn;
                         let shift = un.trailing_zeros();
                         un >>= shift;
-                        if bits + shift > 63 {
-                            (r, s) = apply_matrix(m, r, s);
-                            m = [1, 0, 0, 1];
-                            bits = 0;
-                        }
-                        if shift > 63 {
-                            r = add_limbs(r, s).0;
-                            s = shl_limbs_wide(s, shift);
-                        } else {
-                            m[0] += m[2];
-                            m[1] += m[3];
-                            m[2] <<= shift;
-                            m[3] <<= shift;
-                            bits += shift;
-                        }
+                        cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, true);
                         k += shift;
                         if un == 1 {
                             break;
@@ -358,28 +395,13 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
                         vn -= un;
                         let shift = vn.trailing_zeros();
                         vn >>= shift;
-                        if bits + shift > 63 {
-                            (r, s) = apply_matrix(m, r, s);
-                            m = [1, 0, 0, 1];
-                            bits = 0;
-                        }
-                        if shift > 63 {
-                            s = add_limbs(s, r).0;
-                            r = shl_limbs_wide(r, shift);
-                        } else {
-                            m[2] += m[0];
-                            m[3] += m[1];
-                            m[0] <<= shift;
-                            m[1] <<= shift;
-                            bits += shift;
-                        }
+                        cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, false);
                         k += shift;
                         if vn == 1 {
                             break;
                         }
                     }
                 }
-                (r, s) = apply_matrix(m, r, s);
                 u = [un as u64, (un >> 64) as u64, 0, 0];
                 v = [vn as u64, (vn >> 64) as u64, 0, 0];
                 break;
@@ -387,21 +409,24 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
             let (difference, borrow) = sub_limbs(u, v);
             if borrow == 0 {
                 u = difference;
-                r = add_limbs(r, s).0;
-                k += strip_twos(&mut u, &mut s);
+                let shift = strip_twos_only(&mut u);
+                cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, true);
+                k += shift;
                 if is_one_limbs(u) {
                     break;
                 }
             } else {
                 v = sub_limbs(v, u).0;
-                s = add_limbs(s, r).0;
-                k += strip_twos(&mut v, &mut r);
+                let shift = strip_twos_only(&mut v);
+                cofactor_step(&mut m, &mut bits, &mut r, &mut s, shift, false);
+                k += shift;
                 if is_one_limbs(v) {
                     break;
                 }
             }
         }
     }
+    (r, s) = apply_matrix(m, r, s);
 
     // almost = value^-1 * 2^k mod p, with k < 512.
     let almost = if is_one_limbs(v) {
