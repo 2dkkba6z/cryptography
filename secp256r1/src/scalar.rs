@@ -217,8 +217,19 @@ fn add_signed62(a: Signed62, b: Signed62, sign: i64) -> Signed62 {
 #[inline(always)]
 fn divsteps_62(mut delta: i64, mut f: u64, mut g: u64) -> (i64, [i64; 4]) {
     let (mut u, mut v, mut q, mut r) = (1i64, 0i64, 0i64, 1i64);
-    for _ in 0..62 {
-        if g & 1 != 0 {
+    let mut remaining = 62u32;
+    while remaining > 0 {
+        if g & 1 == 0 {
+            // A run of even steps only increments delta and shifts.
+            let zeros = g.trailing_zeros().min(remaining);
+            delta += zeros as i64;
+            g >>= zeros;
+            u <<= zeros;
+            v <<= zeros;
+            remaining -= zeros;
+            continue;
+        }
+        {
             if delta > 0 {
                 delta = 1 - delta;
                 let (old_f, old_u, old_v) = (f, u, v);
@@ -234,12 +245,11 @@ fn divsteps_62(mut delta: i64, mut f: u64, mut g: u64) -> (i64, [i64; 4]) {
                 q += u;
                 r += v;
             }
-        } else {
-            delta += 1;
         }
         g >>= 1;
         u <<= 1;
         v <<= 1;
+        remaining -= 1;
     }
     (delta, [u, v, q, r])
 }
