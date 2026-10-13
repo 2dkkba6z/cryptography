@@ -735,7 +735,7 @@ fn montgomery_reduce_words(
     r6: u64,
     r7: u64,
 ) -> [u64; 4] {
-    reduce_wide(montgomery_reduce_words_wide(
+    reduce_wide(montgomery_reduce_words_wide_shifted(
         r0, r1, r2, r3, r4, r5, r6, r7,
     ))
 }
@@ -773,6 +773,52 @@ fn montgomery_reduce_words_wide(
     let (r7, r8) = adc(r7, carry2, carry);
 
     [r4, r5, r6, r7, r8]
+}
+
+/// Same result as [`montgomery_reduce_words_wide`], with the products by
+/// the modulus limbs written as shifts.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn montgomery_reduce_words_wide_shifted(
+    r0: u64,
+    r1: u64,
+    r2: u64,
+    r3: u64,
+    r4: u64,
+    r5: u64,
+    r6: u64,
+    r7: u64,
+) -> [u64; 5] {
+    let (r1, r2, r3, r4, carry2) = reduce_step(r0, r1, r2, r3, r4, 0);
+    let (r2, r3, r4, r5, carry2) = reduce_step(r1, r2, r3, r4, r5, carry2);
+    let (r3, r4, r5, r6, carry2) = reduce_step(r2, r3, r4, r5, r6, carry2);
+    let (r4, r5, r6, r7, r8) = reduce_step(r3, r4, r5, r6, r7, carry2);
+
+    [r4, r5, r6, r7, r8]
+}
+
+/// Adds `m * MODULUS` to `m + a1 * 2^64 + ... + a4 * 2^256 + carry * 2^256`
+/// and drops the zero low limb. Since `m * MODULUS + m` equals
+/// `m * 2^96 + m * (2^64 - 2^32 + 1) * 2^192`, the products reduce to shifts.
+#[inline(always)]
+fn reduce_step(
+    m: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    carry: u64,
+) -> (u64, u64, u64, u64, u64) {
+    let shifted = m << 32;
+    // m * (2^64 - 2^32 + 1) = hi * 2^64 + lo.
+    let lo = m.wrapping_sub(shifted);
+    let hi = m - (m >> 32) - u64::from(m < shifted);
+
+    let (a1, c) = adc(a1, shifted, 0);
+    let (a2, c) = adc(a2, m >> 32, c);
+    let (a3, c) = adc(a3, lo, c);
+    let (a4, c) = adc(a4, hi + c, carry);
+    (a1, a2, a3, a4, c)
 }
 
 #[inline(always)]
