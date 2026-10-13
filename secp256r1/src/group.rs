@@ -356,12 +356,11 @@ impl ProjectivePoint {
             return Self::IDENTITY;
         }
 
-        let xx = self.x.square();
         let yy = self.y.square();
         let yyyy = yy.square();
         let zz = self.z.square();
-        let s = double((self.x + yy).square() - xx - yyyy);
-        let m = triple(xx - zz.square());
+        let s = double(double(self.x * yy));
+        let m = triple((self.x - zz) * (self.x + zz));
         let x = m.square() - double(s);
         let y = m * (s - x) - double(double(double(yyyy)));
         let z = (self.y + self.z).square() - yy - zz;
