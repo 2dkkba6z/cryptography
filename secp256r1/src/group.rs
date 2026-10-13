@@ -420,21 +420,25 @@ impl ProjectivePoint {
     /// routine is variable time and must only be used with public scalars.
     #[inline]
     pub fn mul_scalar_vartime_unchecked(self, scalar: [u8; 32]) -> Self {
-        let mut table = [Self::IDENTITY; 16];
-        table[1] = self;
+        // Odd multiples P, 3P, ..., 15P for a width-5 signed NAF.
+        let mut table = [self; 8];
+        let self2 = self.double();
 
-        for i in 2..16 {
-            table[i] = table[i - 1] + self;
+        for i in 1..8 {
+            table[i] = table[i - 1] + self2;
         }
         let affine_table = batch_normalize(table);
 
+        let naf = wnaf5(&scalar);
         let mut out = Self::IDENTITY;
 
-        for &byte in scalar.iter() {
-            out = out.double().double().double().double();
-            out = out.add_mixed(affine_table[(byte >> 4) as usize]);
-            out = out.double().double().double().double();
-            out = out.add_mixed(affine_table[(byte & 0x0f) as usize]);
+        for &digit in naf.iter().rev() {
+            out = out.double();
+            if digit > 0 {
+                out = out.add_mixed(affine_table[(digit >> 1) as usize]);
+            } else if digit < 0 {
+                out = out.add_mixed(-affine_table[((-digit) >> 1) as usize]);
+            }
         }
 
         out
@@ -632,6 +636,50 @@ impl Neg for ProjectivePoint {
 #[inline]
 fn double(x: FieldElement) -> FieldElement {
     x + x
+}
+
+/// Width-5 non-adjacent form of a big-endian 256-bit integer, least
+/// significant digit first. Every digit is zero or odd in `-15..=15`.
+fn wnaf5(scalar: &[u8; 32]) -> [i8; 261] {
+    let mut limbs = [0u64; 5];
+    for (i, limb) in limbs.iter_mut().take(4).enumerate() {
+        let start = 32 - 8 * (i + 1);
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&scalar[start..start + 8]);
+        *limb = u64::from_be_bytes(bytes);
+    }
+
+    let mut naf = [0i8; 261];
+    let mut pos = 0;
+    let mut carry = 0u64;
+
+    while pos < 256 {
+        let idx = pos / 64;
+        let bit = pos % 64;
+        let bits = if bit < 59 {
+            limbs[idx] >> bit
+        } else {
+            (limbs[idx] >> bit) | (limbs[idx + 1] << (64 - bit))
+        };
+        let window = carry + (bits & 31);
+
+        if window & 1 == 0 {
+            pos += 1;
+            continue;
+        }
+
+        if window < 16 {
+            carry = 0;
+            naf[pos] = window as i8;
+        } else {
+            carry = 1;
+            naf[pos] = window as i8 - 32;
+        }
+        pos += 5;
+    }
+    naf[pos] = carry as i8;
+
+    naf
 }
 
 #[inline]
