@@ -324,75 +324,34 @@ fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 
 #[inline(always)]
 fn montgomery_square(a: [u64; 4]) -> [u64; 4] {
-    let a0 = a[0] as u128;
-    let a1 = a[1] as u128;
-    let a2 = a[2] as u128;
-    let a3 = a[3] as u128;
+    // Off-diagonal products a_i * a_j for i < j.
+    let (w1, carry) = mac(0, a[0], a[1], 0);
+    let (w2, carry) = mac(0, a[0], a[2], carry);
+    let (w3, w4) = mac(0, a[0], a[3], carry);
 
-    let p00 = a0 * a0;
-    let w0 = p00 as u64;
-    let mut acc = p00 >> 64;
-    let mut top = 0u64;
+    let (w3, carry) = mac(w3, a[1], a[2], 0);
+    let (w4, w5) = mac(w4, a[1], a[3], carry);
 
-    let p01 = a0 * a1;
-    top += (p01 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p01 << 1);
-    let w1 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
+    let (w5, w6) = mac(w5, a[2], a[3], 0);
 
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p02 = a0 * a2;
-    top += (p02 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p02 << 1);
-    acc = sum;
-    top += u64::from(overflow);
-    let (sum, overflow) = acc.overflowing_add(a1 * a1);
-    let w2 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
+    // Double them.
+    let w7 = w6 >> 63;
+    let w6 = (w6 << 1) | (w5 >> 63);
+    let w5 = (w5 << 1) | (w4 >> 63);
+    let w4 = (w4 << 1) | (w3 >> 63);
+    let w3 = (w3 << 1) | (w2 >> 63);
+    let w2 = (w2 << 1) | (w1 >> 63);
+    let w1 = w1 << 1;
 
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p03 = a0 * a3;
-    top += (p03 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p03 << 1);
-    acc = sum;
-    top += u64::from(overflow);
-    let p12 = a1 * a2;
-    top += (p12 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p12 << 1);
-    let w3 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p13 = a1 * a3;
-    top += (p13 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p13 << 1);
-    acc = sum;
-    top += u64::from(overflow);
-    let (sum, overflow) = acc.overflowing_add(a2 * a2);
-    let w4 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p23 = a2 * a3;
-    top += (p23 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p23 << 1);
-    let w5 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    let (sum, overflow) = acc.overflowing_add(a3 * a3);
-    let w6 = sum as u64;
-    let w7 = (sum >> 64) as u64;
-    debug_assert!(!overflow);
+    // Add the diagonal squares.
+    let (w0, carry) = mac(0, a[0], a[0], 0);
+    let (w1, carry) = adc(w1, 0, carry);
+    let (w2, carry) = mac(w2, a[1], a[1], carry);
+    let (w3, carry) = adc(w3, 0, carry);
+    let (w4, carry) = mac(w4, a[2], a[2], carry);
+    let (w5, carry) = adc(w5, 0, carry);
+    let (w6, carry) = mac(w6, a[3], a[3], carry);
+    let (w7, _) = adc(w7, 0, carry);
 
     montgomery_reduce_words(w0, w1, w2, w3, w4, w5, w6, w7)
 }
