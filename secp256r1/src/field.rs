@@ -313,13 +313,17 @@ fn is_non_residue(value: [u64; 4]) -> bool {
             ];
         }
 
-        if !ge_limbs(a, n) {
-            core::mem::swap(&mut a, &mut n);
+        let (difference, borrow) = sub_limbs(a, n);
+        if borrow != 0 {
+            // a < n: swap them, so the new a is n - a = -difference.
             if (a[0] & 3) == 3 && (n[0] & 3) == 3 {
                 negate = !negate;
             }
+            n = a;
+            a = sub_limbs([0; 4], difference).0;
+        } else {
+            a = difference;
         }
-        a = sub_limbs(a, n).0;
     }
 
     is_one_limbs(n) && negate
@@ -351,17 +355,25 @@ fn is_non_residue_u192(mut a: [u64; 3], mut n: [u64; 3], mut negate: bool) -> bo
             ];
         }
 
-        if (a[2], a[1], a[0]) < (n[2], n[1], n[0]) {
-            core::mem::swap(&mut a, &mut n);
-            if (a[0] & 3) == 3 && (n[0] & 3) == 3 {
-                negate = !negate;
-            }
-        }
         let (w0, borrow) = a[0].overflowing_sub(n[0]);
         let (w1, borrow1) = a[1].overflowing_sub(n[1]);
         let (w1, borrow2) = w1.overflowing_sub(u64::from(borrow));
-        let w2 = a[2].wrapping_sub(n[2]).wrapping_sub(u64::from(borrow1 | borrow2));
-        a = [w0, w1, w2];
+        let (w2, borrow3) = a[2].overflowing_sub(n[2]);
+        let (w2, borrow4) = w2.overflowing_sub(u64::from(borrow1 | borrow2));
+        if borrow3 | borrow4 {
+            // a < n: swap them, so the new a is n - a = -(w2, w1, w0).
+            if (a[0] & 3) == 3 && (n[0] & 3) == 3 {
+                negate = !negate;
+            }
+            n = a;
+            let (v0, borrow) = 0u64.overflowing_sub(w0);
+            let (v1, borrow1) = 0u64.overflowing_sub(w1);
+            let (v1, borrow2) = v1.overflowing_sub(u64::from(borrow));
+            let v2 = 0u64.wrapping_sub(w2).wrapping_sub(u64::from(borrow1 | borrow2));
+            a = [v0, v1, v2];
+        } else {
+            a = [w0, w1, w2];
+        }
     }
 
     is_one_limbs([n[0], n[1], n[2], 0]) && negate
