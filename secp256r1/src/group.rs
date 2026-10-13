@@ -546,8 +546,16 @@ impl ProjectivePoint {
         let mut out = Self::IDENTITY;
 
         for i in (0..261).rev() {
-            out = add_naf_digit(out.double(), generator_table, generator_naf[i]);
-            out = add_naf_digit(out, &point_table, point_naf[i]);
+            let g = generator_naf[i];
+            let p = point_naf[i];
+            if g != 0 {
+                out = out.double_add_mixed(naf_entry(generator_table, g));
+                out = add_naf_digit(out, &point_table, p);
+            } else if p != 0 {
+                out = out.double_add_mixed(naf_entry(&point_table, p));
+            } else {
+                out = out.double();
+            }
         }
 
         out
@@ -852,6 +860,16 @@ fn generator_odd_multiples_table() -> &'static [AffinePoint; 64] {
     static TABLE: OnceLock<[AffinePoint; 64]> = OnceLock::new();
 
     TABLE.get_or_init(|| batch_normalize(odd_multiples(ProjectivePoint::GENERATOR)))
+}
+
+/// Returns the odd multiple selected by a nonzero signed NAF digit.
+#[inline]
+fn naf_entry<const N: usize>(table: &[AffinePoint; N], digit: i8) -> AffinePoint {
+    if digit > 0 {
+        table[(digit >> 1) as usize]
+    } else {
+        -table[((-digit) >> 1) as usize]
+    }
 }
 
 /// Adds the odd multiple selected by a signed NAF digit, if any.
