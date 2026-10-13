@@ -78,7 +78,7 @@ impl FieldElement {
         }
 
         Some(Self {
-            limbs: montgomery_mul(invert_canonical(from_montgomery(self.limbs)), R2),
+            limbs: invert_canonical(from_montgomery(self.limbs)),
         })
     }
 
@@ -227,69 +227,89 @@ fn is_even_limbs(a: [u64; 4]) -> bool {
     (a[0] & 1) == 0
 }
 
+/// Shifts `a` right by `shift` bits, `1 <= shift <= 63`.
 #[inline(always)]
-fn shr1_limbs(a: [u64; 4]) -> [u64; 4] {
-    shr1_limbs_with_carry(a, 0)
-}
-
-#[inline(always)]
-fn shr1_limbs_with_carry(a: [u64; 4], carry: u64) -> [u64; 4] {
+fn shr_limbs(a: [u64; 4], shift: u32) -> [u64; 4] {
     [
-        (a[0] >> 1) | (a[1] << 63),
-        (a[1] >> 1) | (a[2] << 63),
-        (a[2] >> 1) | (a[3] << 63),
-        (a[3] >> 1) | (carry << 63),
+        (a[0] >> shift) | (a[1] << (64 - shift)),
+        (a[1] >> shift) | (a[2] << (64 - shift)),
+        (a[2] >> shift) | (a[3] << (64 - shift)),
+        a[3] >> shift,
     ]
 }
 
+/// Shifts `a` left by `shift` bits, `1 <= shift <= 63`.
 #[inline(always)]
-fn half_mod(a: [u64; 4]) -> [u64; 4] {
-    if is_even_limbs(a) {
-        shr1_limbs(a)
-    } else {
-        let (sum, carry) = add_limbs(a, MODULUS);
-        shr1_limbs_with_carry(sum, carry)
-    }
+fn shl_limbs(a: [u64; 4], shift: u32) -> [u64; 4] {
+    [
+        a[0] << shift,
+        (a[1] << shift) | (a[0] >> (64 - shift)),
+        (a[2] << shift) | (a[1] >> (64 - shift)),
+        (a[3] << shift) | (a[2] >> (64 - shift)),
+    ]
 }
 
+/// Removes all factors of two from `u`, multiplying `x` by
+/// the same power of two, and returns the number of bits removed.
 #[inline(always)]
-fn sub_mod(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    let (difference, borrow) = sub_limbs(a, b);
-
-    if borrow == 0 {
-        difference
-    } else {
-        add_limbs(difference, MODULUS).0
+fn strip_twos(u: &mut [u64; 4], x: &mut [u64; 4]) -> u32 {
+    let mut removed = 0;
+    while is_even_limbs(*u) {
+        let shift = u[0].trailing_zeros().min(63);
+        *u = shr_limbs(*u, shift);
+        *x = shl_limbs(*x, shift);
+        removed += shift;
     }
+    removed
 }
 
+/// Returns `2^exponent mod p` in plain limbs, `exponent <= 256`.
+#[inline(always)]
+fn pow2_mod(exponent: u32) -> [u64; 4] {
+    if exponent == 256 {
+        return FieldElement::ONE.limbs;
+    }
+    let mut limbs = [0; 4];
+    limbs[(exponent / 64) as usize] = 1u64 << (exponent % 64);
+    limbs
+}
+
+/// Returns `value^-1 * 2^256 mod p` (the Montgomery form of the inverse) for a
+/// canonical nonzero `value`, using the almost Montgomery inverse.
 fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
-    let mut u = value;
-    let mut v = MODULUS;
-    let mut x1 = [1, 0, 0, 0];
-    let mut x2 = [0; 4];
+    // Invariants: u * s + v * r = p, value * s = v * 2^k and
+    // value * r = -u * 2^k (mod p). While u, v >= 1 this keeps r, s <= p.
+    let mut u = MODULUS;
+    let mut v = value;
+    let mut r = [0; 4];
+    let mut s = [1, 0, 0, 0];
+    let mut k = strip_twos(&mut v, &mut r);
 
     while !is_one_limbs(u) && !is_one_limbs(v) {
-        while is_even_limbs(u) {
-            u = shr1_limbs(u);
-            x1 = half_mod(x1);
-        }
-
-        while is_even_limbs(v) {
-            v = shr1_limbs(v);
-            x2 = half_mod(x2);
-        }
-
-        if ge_limbs(u, v) {
-            u = sub_limbs(u, v).0;
-            x1 = sub_mod(x1, x2);
+        let (difference, borrow) = sub_limbs(u, v);
+        if borrow == 0 {
+            u = difference;
+            r = add_limbs(r, s).0;
+            k += strip_twos(&mut u, &mut s);
         } else {
-            v = sub_limbs(v, u).0;
-            x2 = sub_mod(x2, x1);
+            v = sub_limbs([0; 4], difference).0;
+            s = add_limbs(s, r).0;
+            k += strip_twos(&mut v, &mut r);
         }
     }
 
-    if is_one_limbs(u) { x1 } else { x2 }
+    // almost = value^-1 * 2^k mod p, with k < 512.
+    let almost = if is_one_limbs(v) {
+        s
+    } else {
+        sub_limbs(MODULUS, r).0
+    };
+
+    if k <= 256 {
+        montgomery_mul(montgomery_mul(almost, R2), pow2_mod(256 - k))
+    } else {
+        montgomery_mul(almost, pow2_mod(512 - k))
+    }
 }
 
 #[inline(always)]
