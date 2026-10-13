@@ -99,8 +99,8 @@ impl FieldElement {
         let x8 = x4.square_n(4) * x4;
         let x16 = x8.square_n(8) * x8;
         let x32 = x16.square_n(16) * x16;
-        let candidate = ((x32.square_n(32) * self).square_n(96) * self).square_n(94);
-        (candidate.square() == self).then_some(candidate)
+        // The symbol is 0 or 1 here and p = 3 (mod 4), so this is a root.
+        Some(((x32.square_n(32) * self).square_n(96) * self).square_n(94))
     }
 
     #[inline]
@@ -276,6 +276,13 @@ fn is_non_residue(value: [u64; 4]) -> bool {
     let mut negate = false;
 
     while a != [0; 4] {
+        if (a[2] | a[3] | n[2] | n[3]) == 0 {
+            return is_non_residue_u128(
+                (u128::from(a[1]) << 64) | u128::from(a[0]),
+                (u128::from(n[1]) << 64) | u128::from(n[0]),
+                negate,
+            );
+        }
         while a[0] == 0 {
             // Shifting by 64 bits keeps the symbol: 64 is even.
             a = [a[1], a[2], a[3], 0];
@@ -303,6 +310,27 @@ fn is_non_residue(value: [u64; 4]) -> bool {
     }
 
     is_one_limbs(n) && negate
+}
+
+/// Tail of [`is_non_residue`] once both operands fit in 128 bits.
+fn is_non_residue_u128(mut a: u128, mut n: u128, mut negate: bool) -> bool {
+    while a != 0 {
+        let shift = a.trailing_zeros();
+        if (shift & 1) == 1 && matches!(n & 7, 3 | 5) {
+            negate = !negate;
+        }
+        a >>= shift;
+
+        if a < n {
+            core::mem::swap(&mut a, &mut n);
+            if (a & 3) == 3 && (n & 3) == 3 {
+                negate = !negate;
+            }
+        }
+        a -= n;
+    }
+
+    n == 1 && negate
 }
 
 fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
