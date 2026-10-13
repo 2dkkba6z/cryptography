@@ -345,32 +345,22 @@ fn invert_canonical(a: [u64; 4]) -> [u64; 4] {
 
 #[inline(always)]
 fn add_limbs(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
-    let mut out = [0; 4];
-    let mut carry = 0u64;
+    let (w0, carry) = adc(a[0], b[0], 0);
+    let (w1, carry) = adc(a[1], b[1], carry);
+    let (w2, carry) = adc(a[2], b[2], carry);
+    let (w3, carry) = adc(a[3], b[3], carry);
 
-    for i in 0..4 {
-        let (sum, carry1) = a[i].overflowing_add(b[i]);
-        let (sum, carry2) = sum.overflowing_add(carry);
-        out[i] = sum;
-        carry = u64::from(carry1 | carry2);
-    }
-
-    (out, carry)
+    ([w0, w1, w2, w3], carry)
 }
 
 #[inline(always)]
 fn sub_limbs(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
-    let mut out = [0; 4];
-    let mut borrow = 0u64;
+    let (w0, borrow) = sbb(a[0], b[0], 0);
+    let (w1, borrow) = sbb(a[1], b[1], borrow);
+    let (w2, borrow) = sbb(a[2], b[2], borrow);
+    let (w3, borrow) = sbb(a[3], b[3], borrow);
 
-    for i in 0..4 {
-        let (difference, borrow1) = a[i].overflowing_sub(b[i]);
-        let (difference, borrow2) = difference.overflowing_sub(borrow);
-        out[i] = difference;
-        borrow = u64::from(borrow1 | borrow2);
-    }
-
-    (out, borrow)
+    ([w0, w1, w2, w3], borrow)
 }
 
 #[inline(always)]
