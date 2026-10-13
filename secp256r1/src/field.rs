@@ -200,6 +200,9 @@ fn sub_limbs(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
 
 #[inline(always)]
 fn reduce_sum(sum: [u64; 4], carry: u64) -> [u64; 4] {
+    if carry == 0 && sum[3] < MODULUS[3] {
+        return sum;
+    }
     let (reduced, overflow) = add_limbs(sum, NEG_MODULUS);
 
     if (carry | overflow) != 0 {
@@ -403,6 +406,9 @@ fn montgomery_reduce_words(
 #[inline(always)]
 fn reduce_wide(value: [u64; 5]) -> [u64; 4] {
     let low = [value[0], value[1], value[2], value[3]];
+    if value[4] == 0 && value[3] < MODULUS[3] {
+        return low;
+    }
     let (reduced, carry) = add_limbs(low, NEG_MODULUS);
 
     if (value[4] | carry) != 0 {
