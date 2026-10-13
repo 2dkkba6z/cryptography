@@ -356,13 +356,15 @@ impl ProjectivePoint {
             return Self::IDENTITY;
         }
 
-        let yy2 = double(self.y.square());
+        // With t = 2Y and a = 4Y^2: S = X * a, 8Y^4 = a^2 / 2, Z3 = t * Z.
+        let t = double(self.y);
+        let a = t.square();
         let zz = self.z.square();
-        let s = double(self.x * yy2);
+        let s = self.x * a;
         let m = triple((self.x - zz) * (self.x + zz));
         let x = m.square() - double(s);
-        let y = m * (s - x) - double(yy2.square());
-        let z = double(self.y * self.z);
+        let y = m * (s - x) - a.square().half();
+        let z = t * self.z;
 
         Self { x, y, z }
     }

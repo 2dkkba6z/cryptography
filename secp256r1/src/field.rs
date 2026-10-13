@@ -103,6 +103,14 @@ impl FieldElement {
         Some(((x32.square_n(32) * self).square_n(96) * self).square_n(94))
     }
 
+    /// Returns `self / 2`.
+    #[inline]
+    pub(crate) fn half(self) -> Self {
+        Self {
+            limbs: half_mod(self.limbs),
+        }
+    }
+
     #[inline]
     fn square_n(self, n: usize) -> Self {
         let mut out = self;
