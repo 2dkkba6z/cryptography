@@ -704,6 +704,51 @@ fn odd_multiples<const N: usize>(base: ProjectivePoint) -> [ProjectivePoint; N] 
     let mut table = [base; N];
 
     if base2.is_identity() {
+        return odd_multiples_mixed(base, base2);
+    }
+
+    // Co-Z additions: P rescaled to the Z of 2P = (2Y * Z), and every sum
+    // also yields 2P rescaled to the Z of that sum.
+    let t = double(base.y);
+    let tt = t.square();
+    let mut step = base2;
+    let mut entry = ProjectivePoint {
+        x: base.x * tt,
+        y: base.y * tt * t,
+        z: base2.z,
+    };
+
+    for item in table.iter_mut().skip(1) {
+        let h = entry.x - step.x;
+        if h.is_zero() {
+            return odd_multiples_mixed(base, base2);
+        }
+        let a = h.square();
+        let b = step.x * a;
+        let c = entry.x * a;
+        let dy = entry.y - step.y;
+        let e = step.y * (c - b);
+        let x = dy.square() - b - c;
+        let y = dy * (b - x) - e;
+        let z = step.z * h;
+
+        step = ProjectivePoint { x: b, y: e, z };
+        entry = ProjectivePoint { x, y, z };
+        *item = entry;
+    }
+
+    table
+}
+
+/// Odd multiples P, 3P, ..., 15P using mixed additions of 2P.
+#[inline]
+fn odd_multiples_mixed<const N: usize>(
+    base: ProjectivePoint,
+    base2: ProjectivePoint,
+) -> [ProjectivePoint; N] {
+    let mut table = [base; N];
+
+    if base2.is_identity() {
         for i in 1..N {
             table[i] = table[i - 1] + base2;
         }
