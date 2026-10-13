@@ -426,15 +426,61 @@ impl ProjectivePoint {
         let mut out = Self::IDENTITY;
 
         for &digit in naf.iter().rev() {
-            out = out.double();
             if digit > 0 {
-                out = out.add_mixed(affine_table[(digit >> 1) as usize]);
+                out = out.double_add_mixed(affine_table[(digit >> 1) as usize]);
             } else if digit < 0 {
-                out = out.add_mixed(-affine_table[((-digit) >> 1) as usize]);
+                out = out.double_add_mixed(-affine_table[((-digit) >> 1) as usize]);
+            } else {
+                out = out.double();
             }
         }
 
         out
+    }
+
+    /// Computes `2 * self + rhs` as `(self + rhs) + self`.
+    ///
+    /// The mixed addition also yields `self` rescaled to the `Z` of the sum,
+    /// so the second addition uses the cheaper co-Z formula. Degenerate cases
+    /// fall back to doubling followed by a mixed addition.
+    #[inline]
+    fn double_add_mixed(self, rhs: AffinePoint) -> Self {
+        if rhs.infinity || self.is_identity() {
+            return self.double().add_mixed(rhs);
+        }
+
+        let z1z1 = self.z.square();
+        let u2 = rhs.x * z1z1;
+        let s2 = rhs.y * self.z * z1z1;
+        let h = u2 - self.x;
+        let slope_num = s2 - self.y;
+
+        if h.is_zero() {
+            return self.double().add_mixed(rhs);
+        }
+
+        let hh = h.square();
+        let hhh = h * hh;
+        // self rescaled to Z = self.z * h.
+        let x1 = self.x * hh;
+        let y1 = self.y * hhh;
+        let x2 = slope_num.square() - hhh - double(x1);
+        let dx = x1 - x2;
+        let y2 = slope_num * dx - y1;
+        let z = self.z * h;
+
+        if dx.is_zero() {
+            return self.double().add_mixed(rhs);
+        }
+
+        let a = dx.square();
+        let b = x2 * a;
+        let c = x1 * a;
+        let dy = y1 - y2;
+        let x = dy.square() - b - c;
+        let y = dy * (b - x) - y2 * (c - b);
+
+        Self { x, y, z: z * dx }
     }
 
     /// Multiplies the generator by a canonical, big-endian scalar.
