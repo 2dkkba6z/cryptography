@@ -425,6 +425,10 @@ fn invert_canonical(value: [u64; 4]) -> ([u64; 4], u32) {
     let mut k = 0;
 
     loop {
+        if (u[3] | v[3]) == 0 {
+            return almost_inverse_u192([u[0], u[1], u[2]], [v[0], v[1], v[2]], r, s, k);
+        }
+
         while is_even_limbs(u) {
             u = shr1_limbs(u);
             s = shl1_limbs(s);
@@ -452,6 +456,156 @@ fn invert_canonical(value: [u64; 4]) -> ([u64; 4], u32) {
         }
     }
 
+    finish_almost_inverse(r, k)
+}
+
+/// The tail of `invert_canonical` once `u` and `v` fit in 192 bits.
+fn almost_inverse_u192(
+    mut u: [u64; 3],
+    mut v: [u64; 3],
+    mut r: [u64; 4],
+    mut s: [u64; 4],
+    mut k: u32,
+) -> ([u64; 4], u32) {
+    loop {
+        if (u[2] | v[2]) == 0 {
+            let u = u128::from(u[0]) | (u128::from(u[1]) << 64);
+            let v = u128::from(v[0]) | (u128::from(v[1]) << 64);
+            return almost_inverse_u128(u, v, r, s, k);
+        }
+
+        while (u[0] & 1) == 0 {
+            u = shr1_u192(u);
+            s = shl1_limbs(s);
+            k += 1;
+        }
+
+        while (v[0] & 1) == 0 {
+            v = shr1_u192(v);
+            r = shl1_limbs(r);
+            k += 1;
+        }
+
+        k += 1;
+        let (difference, borrow) = sub_u192(u, v);
+        if borrow != 0 {
+            v = shr1_u192(sub_u192(v, u).0);
+            s = add_limbs(r, s).0;
+            r = shl1_limbs(r);
+        } else if difference != [0; 3] {
+            u = shr1_u192(difference);
+            r = add_limbs(r, s).0;
+            s = shl1_limbs(s);
+        } else {
+            break;
+        }
+    }
+
+    finish_almost_inverse(r, k)
+}
+
+#[inline(always)]
+fn shr1_u192(a: [u64; 3]) -> [u64; 3] {
+    [
+        (a[0] >> 1) | (a[1] << 63),
+        (a[1] >> 1) | (a[2] << 63),
+        a[2] >> 1,
+    ]
+}
+
+#[inline(always)]
+fn sub_u192(a: [u64; 3], b: [u64; 3]) -> ([u64; 3], u64) {
+    let (w0, borrow0) = a[0].overflowing_sub(b[0]);
+    let (w1, borrow1) = a[1].overflowing_sub(b[1]);
+    let (w1, borrow2) = w1.overflowing_sub(u64::from(borrow0));
+    let (w2, borrow3) = a[2].overflowing_sub(b[2]);
+    let (w2, borrow4) = w2.overflowing_sub(u64::from(borrow1 | borrow2));
+
+    ([w0, w1, w2], u64::from(borrow3 | borrow4))
+}
+
+/// The tail of `invert_canonical` once `u` and `v` fit in 128 bits.
+fn almost_inverse_u128(
+    mut u: u128,
+    mut v: u128,
+    mut r: [u64; 4],
+    mut s: [u64; 4],
+    mut k: u32,
+) -> ([u64; 4], u32) {
+    loop {
+        if (u | v) >> 64 == 0 {
+            return almost_inverse_u64(u as u64, v as u64, r, s, k);
+        }
+
+        while u & 1 == 0 {
+            u >>= 1;
+            s = shl1_limbs(s);
+            k += 1;
+        }
+
+        while v & 1 == 0 {
+            v >>= 1;
+            r = shl1_limbs(r);
+            k += 1;
+        }
+
+        k += 1;
+        if u < v {
+            v = (v - u) >> 1;
+            s = add_limbs(r, s).0;
+            r = shl1_limbs(r);
+        } else if u != v {
+            u = (u - v) >> 1;
+            r = add_limbs(r, s).0;
+            s = shl1_limbs(s);
+        } else {
+            break;
+        }
+    }
+
+    finish_almost_inverse(r, k)
+}
+
+/// The tail of `invert_canonical` once `u` and `v` fit in 64 bits.
+fn almost_inverse_u64(
+    mut u: u64,
+    mut v: u64,
+    mut r: [u64; 4],
+    mut s: [u64; 4],
+    mut k: u32,
+) -> ([u64; 4], u32) {
+    loop {
+        while u & 1 == 0 {
+            u >>= 1;
+            s = shl1_limbs(s);
+            k += 1;
+        }
+
+        while v & 1 == 0 {
+            v >>= 1;
+            r = shl1_limbs(r);
+            k += 1;
+        }
+
+        k += 1;
+        if u < v {
+            v = (v - u) >> 1;
+            s = add_limbs(r, s).0;
+            r = shl1_limbs(r);
+        } else if u != v {
+            u = (u - v) >> 1;
+            r = add_limbs(r, s).0;
+            s = shl1_limbs(s);
+        } else {
+            break;
+        }
+    }
+
+    finish_almost_inverse(r, k)
+}
+
+#[inline(always)]
+fn finish_almost_inverse(r: [u64; 4], k: u32) -> ([u64; 4], u32) {
     // u = v = 1: the last step sets r = 2r, which may exceed 2^256.
     let (doubled, carry) = add_limbs(r, r);
     let reduced = if carry != 0 || ge_limbs(doubled, MODULUS) {
