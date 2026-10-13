@@ -539,8 +539,12 @@ impl ProjectivePoint {
         // generator scalar and P, 3P, ..., 15P for a width-5 one of the point
         // scalar.
         let generator_table = generator_odd_multiples_table();
-        let point_table: [AffinePoint; 8] =
-            batch_normalize(odd_multiples(Self::from_affine(point)));
+        let point_table: [AffinePoint; 8] = match odd_multiples_co_z(Self::from_affine(point)) {
+            Some(chain) => normalize_co_z_chains(&[point], &[chain])
+                .try_into()
+                .expect("one chain normalizes to one table"),
+            None => batch_normalize(odd_multiples(Self::from_affine(point))),
+        };
         let generator_naf = wnaf::<8>(&generator_scalar);
         let point_naf = wnaf5(&point_scalar);
         let mut out = Self::IDENTITY;
@@ -604,16 +608,27 @@ impl ProjectivePoint {
         // Odd multiples P, 3P, ..., 15P per point for width-5 signed NAFs.
         // All tables share a single field inversion; P itself is already
         // affine and is not normalized again.
-        let mut projective = Vec::with_capacity(points.len() * 7);
-        for point in points {
-            projective.extend_from_slice(&odd_multiples::<8>(Self::from_affine(*point))[1..]);
-        }
-        let normalized = batch_normalize_slice(&projective);
-        let mut affine = Vec::with_capacity(points.len() * 8);
-        for (point, multiples) in points.iter().zip(normalized.chunks_exact(7)) {
-            affine.push(*point);
-            affine.extend_from_slice(multiples);
-        }
+        let chains: Option<Vec<_>> = points
+            .iter()
+            .map(|point| odd_multiples_co_z::<8>(Self::from_affine(*point)))
+            .collect();
+        let affine = match chains {
+            Some(chains) => normalize_co_z_chains(points, &chains),
+            None => {
+                let mut projective = Vec::with_capacity(points.len() * 7);
+                for point in points {
+                    projective
+                        .extend_from_slice(&odd_multiples::<8>(Self::from_affine(*point))[1..]);
+                }
+                let normalized = batch_normalize_slice(&projective);
+                let mut affine = Vec::with_capacity(points.len() * 8);
+                for (point, multiples) in points.iter().zip(normalized.chunks_exact(7)) {
+                    affine.push(*point);
+                    affine.extend_from_slice(multiples);
+                }
+                affine
+            }
+        };
         let nafs: Vec<_> = scalars.iter().map(wnaf5).collect();
         let mut out = Self::IDENTITY;
 
@@ -708,29 +723,55 @@ fn double(x: FieldElement) -> FieldElement {
 /// their `Z` by the `Z` of 2P.
 #[inline]
 fn odd_multiples<const N: usize>(base: ProjectivePoint) -> [ProjectivePoint; N] {
-    let base2 = base.double();
-    let mut table = [base; N];
+    match odd_multiples_co_z(base) {
+        Some((table, _)) => table,
+        None => odd_multiples_mixed(base, base.double()),
+    }
+}
 
-    if base2.is_identity() {
-        return odd_multiples_mixed(base, base2);
+/// Co-Z odd multiples together with the factors `h[k]` such that the `Z` of
+/// entry `k` is the `Z` of entry `k - 1` times `h[k]`, for `k >= 1`.
+///
+/// Returns `None` in the degenerate cases handled by `odd_multiples_mixed`.
+#[inline]
+fn odd_multiples_co_z<const N: usize>(
+    base: ProjectivePoint,
+) -> Option<([ProjectivePoint; N], [FieldElement; N])> {
+    let mut table = [base; N];
+    let mut factors = [FieldElement::ONE; N];
+
+    if base.is_identity() || base.y.is_zero() {
+        return None;
     }
 
-    // Co-Z additions: P rescaled to the Z of 2P = (2Y * Z), and every sum
-    // also yields 2P rescaled to the Z of that sum.
+    // 2P as in `double`, whose intermediates S = X * 4Y^2 and 8Y^4 are P
+    // rescaled to the Z of 2P = (2Y * Z). Every co-Z sum also yields 2P
+    // rescaled to the Z of that sum.
     let t = double(base.y);
-    let tt = t.square();
-    let mut step = base2;
+    let a = t.square();
+    let zz = base.z.square();
+    let s = base.x * a;
+    let m = triple((base.x - zz) * (base.x + zz));
+    let x2 = m.square() - double(s);
+    let y4 = a.square().half();
+    let z2 = t * base.z;
+    let mut step = ProjectivePoint {
+        x: x2,
+        y: m * (s - x2) - y4,
+        z: z2,
+    };
     let mut entry = ProjectivePoint {
-        x: base.x * tt,
-        y: base.y * tt * t,
-        z: base2.z,
+        x: s,
+        y: y4,
+        z: z2,
     };
 
-    for item in table.iter_mut().skip(1) {
+    for (item, factor) in table.iter_mut().zip(factors.iter_mut()).skip(1) {
         let h = entry.x - step.x;
         if h.is_zero() {
-            return odd_multiples_mixed(base, base2);
+            return None;
         }
+        *factor = h;
         let a = h.square();
         let b = step.x * a;
         let c = entry.x * a;
@@ -745,7 +786,7 @@ fn odd_multiples<const N: usize>(base: ProjectivePoint) -> [ProjectivePoint; N] 
         *item = entry;
     }
 
-    table
+    Some((table, factors))
 }
 
 /// Odd multiples P, 3P, ..., 15P using mixed additions of 2P.
@@ -918,6 +959,49 @@ fn batch_normalize_slice(points: &[ProjectivePoint]) -> Vec<AffinePoint> {
             y: point.y * z_inverse2 * z_inverse,
             infinity: false,
         };
+    }
+
+    out
+}
+
+/// Normalizes co-Z odd-multiple tables, keeping each input point as entry 0.
+///
+/// Only the last `Z` of each chain is batch inverted; the earlier inverses
+/// follow by multiplying with the chain factors.
+fn normalize_co_z_chains(
+    points: &[AffinePoint],
+    chains: &[([ProjectivePoint; 8], [FieldElement; 8])],
+) -> Vec<AffinePoint> {
+    let mut products = vec![FieldElement::ONE; chains.len()];
+    let mut acc = FieldElement::ONE;
+    for (product, (table, _)) in products.iter_mut().zip(chains) {
+        *product = acc;
+        acc = acc * table[7].z;
+    }
+
+    let mut out = vec![AffinePoint::IDENTITY; chains.len() * 8];
+    let Some(mut acc_inverse) = acc.invert() else {
+        return out;
+    };
+
+    for i in (0..chains.len()).rev() {
+        let (table, factors) = &chains[i];
+        let mut z_inverse = acc_inverse * products[i];
+        acc_inverse = acc_inverse * table[7].z;
+
+        let entries = &mut out[i * 8..(i + 1) * 8];
+        entries[0] = points[i];
+        for k in (1..8).rev() {
+            let z_inverse2 = z_inverse.square();
+            entries[k] = AffinePoint {
+                x: table[k].x * z_inverse2,
+                y: table[k].y * z_inverse2 * z_inverse,
+                infinity: false,
+            };
+            if k > 1 {
+                z_inverse = z_inverse * factors[k];
+            }
+        }
     }
 
     out
