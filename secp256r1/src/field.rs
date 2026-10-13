@@ -273,6 +273,29 @@ fn strip_twos(u: &mut [u64; 4], x: &mut [u64; 4]) -> u32 {
     removed
 }
 
+/// Returns `x * a + y * b` modulo 2^256.
+#[inline(always)]
+fn lin_comb(a: [u64; 4], x: u64, b: [u64; 4], y: u64) -> [u64; 4] {
+    let mut out = [0; 4];
+    let mut carry_a = 0;
+    let mut carry_b = 0;
+    for i in 0..4 {
+        let (w, c) = mac(0, a[i], x, carry_a);
+        carry_a = c;
+        let (w, c) = mac(w, b[i], y, carry_b);
+        carry_b = c;
+        out[i] = w;
+    }
+    out
+}
+
+/// Applies the collected inverse-step matrix to `(r, s)`. The results are the
+/// cofactors of the inverse, which never exceed p, so 256 bits are exact.
+#[inline(always)]
+fn apply_matrix(m: [u64; 4], r: [u64; 4], s: [u64; 4]) -> ([u64; 4], [u64; 4]) {
+    (lin_comb(r, m[0], s, m[1]), lin_comb(r, m[2], s, m[3]))
+}
+
 /// Returns `2^exponent mod p` in plain limbs, `exponent <= 256`.
 #[inline(always)]
 fn pow2_mod(exponent: u32) -> [u64; 4] {
@@ -302,29 +325,61 @@ fn invert_canonical(value: [u64; 4]) -> [u64; 4] {
                 // Both fit in 128 bits: finish the same steps on native u128s.
                 let mut un = (u[0] as u128) | ((u[1] as u128) << 64);
                 let mut vn = (v[0] as u128) | ((v[1] as u128) << 64);
+                // The r and s updates are collected in a matrix m, with
+                // r = m[0] * r + m[1] * s and s = m[2] * r + m[3] * s. Its
+                // entries are at most 2^bits, so bits <= 63 keeps them in u64.
+                let mut m = [1u64, 0, 0, 1];
+                let mut bits = 0u32;
                 loop {
                     if un >= vn {
                         un -= vn;
-                        r = add_limbs(r, s).0;
                         let shift = un.trailing_zeros();
                         un >>= shift;
-                        s = shl_limbs_wide(s, shift);
+                        if bits + shift > 63 {
+                            (r, s) = apply_matrix(m, r, s);
+                            m = [1, 0, 0, 1];
+                            bits = 0;
+                        }
+                        if shift > 63 {
+                            r = add_limbs(r, s).0;
+                            s = shl_limbs_wide(s, shift);
+                        } else {
+                            m[0] += m[2];
+                            m[1] += m[3];
+                            m[2] <<= shift;
+                            m[3] <<= shift;
+                            bits += shift;
+                        }
                         k += shift;
                         if un == 1 {
                             break;
                         }
                     } else {
                         vn -= un;
-                        s = add_limbs(s, r).0;
                         let shift = vn.trailing_zeros();
                         vn >>= shift;
-                        r = shl_limbs_wide(r, shift);
+                        if bits + shift > 63 {
+                            (r, s) = apply_matrix(m, r, s);
+                            m = [1, 0, 0, 1];
+                            bits = 0;
+                        }
+                        if shift > 63 {
+                            s = add_limbs(s, r).0;
+                            r = shl_limbs_wide(r, shift);
+                        } else {
+                            m[2] += m[0];
+                            m[3] += m[1];
+                            m[0] <<= shift;
+                            m[1] <<= shift;
+                            bits += shift;
+                        }
                         k += shift;
                         if vn == 1 {
                             break;
                         }
                     }
                 }
+                (r, s) = apply_matrix(m, r, s);
                 u = [un as u64, (un >> 64) as u64, 0, 0];
                 v = [vn as u64, (vn >> 64) as u64, 0, 0];
                 break;
