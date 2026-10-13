@@ -104,9 +104,8 @@ impl Scalar {
             return None;
         }
 
-        // Seeding the cofactor with R^2 maps (aR)^-1 directly to a^-1 R.
         Some(Self {
-            limbs: invert_canonical(self.limbs, R2),
+            limbs: invert_canonical(self.limbs),
         })
     }
 
@@ -168,82 +167,166 @@ impl Neg for Scalar {
     }
 }
 
-/// Inverts a nonzero canonical integer modulo n with the binary extended
-/// Euclidean algorithm, returning `seed * a^-1 mod n`. The result is
-/// canonical when `seed` is.
-#[inline]
-fn invert_canonical(a: [u64; 4], seed: [u64; 4]) -> [u64; 4] {
-    const ONE: [u64; 4] = [1, 0, 0, 0];
+const M62: i64 = (1 << 62) - 1;
 
-    let mut u = a;
-    let mut v = MODULUS;
-    let mut x1 = seed;
-    let mut x2 = [0u64; 4];
+/// Signed 62-bit limb representation: the value is `sum(l[i] * 2^(62 i))`.
+/// Limbs 0..4 are kept in `[0, 2^62)` and the top limb carries the sign.
+type Signed62 = [i64; 5];
 
-    while u[0] & 1 == 0 {
-        u = shr1(u, 0);
-        x1 = half_mod(x1);
-    }
-    if u == ONE {
-        return x1;
-    }
+const MODULUS_S62: Signed62 = to_signed62(MODULUS);
 
-    // u and v are both odd here, so each difference is even and only the
-    // operand that was just reduced needs its factors of two removed.
-    loop {
-        let (difference, borrow) = sub_limbs(u, v);
-        if borrow == 0 {
-            u = difference;
-            x1 = sub_mod(x1, x2);
-            while u[0] & 1 == 0 {
-                u = shr1(u, 0);
-                x1 = half_mod(x1);
-            }
-            if u == ONE {
-                return x1;
-            }
-        } else {
-            v = sub_limbs(v, u).0;
-            x2 = sub_mod(x2, x1);
-            while v[0] & 1 == 0 {
-                v = shr1(v, 0);
-                x2 = half_mod(x2);
-            }
-            if v == ONE {
-                return x2;
-            }
-        }
-    }
-}
+/// `-n^-1 mod 2^62`.
+const MODULUS_NEG_INV62: i64 = (MODULUS_INV as i64) & M62;
 
-#[inline(always)]
-fn shr1(a: [u64; 4], top: u64) -> [u64; 4] {
+const fn to_signed62(a: [u64; 4]) -> Signed62 {
     [
-        (a[0] >> 1) | (a[1] << 63),
-        (a[1] >> 1) | (a[2] << 63),
-        (a[2] >> 1) | (a[3] << 63),
-        (a[3] >> 1) | (top << 63),
+        (a[0] as i64) & M62,
+        (((a[0] >> 62) | (a[1] << 2)) as i64) & M62,
+        (((a[1] >> 60) | (a[2] << 4)) as i64) & M62,
+        (((a[2] >> 58) | (a[3] << 6)) as i64) & M62,
+        (a[3] >> 56) as i64,
     ]
 }
 
 #[inline(always)]
-fn half_mod(a: [u64; 4]) -> [u64; 4] {
-    if a[0] & 1 == 0 {
-        shr1(a, 0)
-    } else {
-        let (sum, carry) = add_limbs(a, MODULUS);
-        shr1(sum, carry)
-    }
+fn from_signed62(a: Signed62) -> [u64; 4] {
+    [
+        (a[0] as u64) | ((a[1] as u64) << 62),
+        ((a[1] as u64) >> 2) | ((a[2] as u64) << 60),
+        ((a[2] as u64) >> 4) | ((a[3] as u64) << 58),
+        ((a[3] as u64) >> 6) | ((a[4] as u64) << 56),
+    ]
 }
 
+/// Returns `a + sign * b` with limbs 0..4 normalized, `sign` in {-1, 1}.
 #[inline(always)]
-fn sub_mod(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    let (difference, borrow) = sub_limbs(a, b);
-    if borrow == 0 {
-        difference
-    } else {
-        add_limbs(difference, MODULUS).0
+fn add_signed62(a: Signed62, b: Signed62, sign: i64) -> Signed62 {
+    let mut out = [0; 5];
+    let mut carry = 0i64;
+    for i in 0..4 {
+        carry += a[i] + sign * b[i];
+        out[i] = carry & M62;
+        carry >>= 62;
     }
+    out[4] = a[4] + sign * b[4] + carry;
+    out
+}
+
+/// Runs 62 divsteps on the low bits of `f` and `g`, returning the new delta
+/// and the transition matrix `[u, v, q, r]` scaled by `2^62`.
+#[inline(always)]
+fn divsteps_62(mut delta: i64, mut f: u64, mut g: u64) -> (i64, [i64; 4]) {
+    let (mut u, mut v, mut q, mut r) = (1i64, 0i64, 0i64, 1i64);
+    for _ in 0..62 {
+        if g & 1 != 0 {
+            if delta > 0 {
+                delta = 1 - delta;
+                let (old_f, old_u, old_v) = (f, u, v);
+                f = g;
+                u = q;
+                v = r;
+                g = g.wrapping_sub(old_f);
+                q -= old_u;
+                r -= old_v;
+            } else {
+                delta += 1;
+                g = g.wrapping_add(f);
+                q += u;
+                r += v;
+            }
+        } else {
+            delta += 1;
+        }
+        g >>= 1;
+        u <<= 1;
+        v <<= 1;
+    }
+    (delta, [u, v, q, r])
+}
+
+/// Applies the matrix to `f` and `g`, dividing exactly by `2^62`.
+#[inline(always)]
+fn update_fg(f: &mut Signed62, g: &mut Signed62, t: [i64; 4]) {
+    let [u, v, q, r] = t.map(i128::from);
+    let mut cf = u * f[0] as i128 + v * g[0] as i128;
+    let mut cg = q * f[0] as i128 + r * g[0] as i128;
+    cf >>= 62;
+    cg >>= 62;
+    for i in 1..5 {
+        cf += u * f[i] as i128 + v * g[i] as i128;
+        cg += q * f[i] as i128 + r * g[i] as i128;
+        f[i - 1] = (cf as i64) & M62;
+        g[i - 1] = (cg as i64) & M62;
+        cf >>= 62;
+        cg >>= 62;
+    }
+    f[4] = cf as i64;
+    g[4] = cg as i64;
+}
+
+/// Applies the matrix to `d` and `e` and divides by `2^62` modulo n.
+#[inline(always)]
+fn update_de(d: &mut Signed62, e: &mut Signed62, t: [i64; 4]) {
+    let [u, v, q, r] = t.map(i128::from);
+    let mut cd = u * d[0] as i128 + v * e[0] as i128;
+    let mut ce = q * d[0] as i128 + r * e[0] as i128;
+    let md = ((cd as i64).wrapping_mul(MODULUS_NEG_INV62) & M62) as i128;
+    let me = ((ce as i64).wrapping_mul(MODULUS_NEG_INV62) & M62) as i128;
+    cd += md * MODULUS_S62[0] as i128;
+    ce += me * MODULUS_S62[0] as i128;
+    cd >>= 62;
+    ce >>= 62;
+    for i in 1..5 {
+        let n = MODULUS_S62[i] as i128;
+        cd += u * d[i] as i128 + v * e[i] as i128 + md * n;
+        ce += q * d[i] as i128 + r * e[i] as i128 + me * n;
+        d[i - 1] = (cd as i64) & M62;
+        e[i - 1] = (ce as i64) & M62;
+        cd >>= 62;
+        ce >>= 62;
+    }
+    d[4] = cd as i64;
+    e[4] = ce as i64;
+}
+
+/// Returns `a^-1 * 2^512 mod n` for a canonical nonzero `a`, using
+/// variable-time Bernstein-Yang divsteps. For Montgomery limbs `a = xR` this
+/// is `x^-1 R`.
+#[inline]
+fn invert_canonical(a: [u64; 4]) -> [u64; 4] {
+    // Invariants: f = d * a and g = e * a (mod n), scaled by R2.
+    let mut f = MODULUS_S62;
+    let mut g = to_signed62(a);
+    let mut d = [0i64; 5];
+    let mut e = to_signed62(R2);
+    let mut delta = 1i64;
+
+    loop {
+        let (next_delta, t) = divsteps_62(delta, f[0] as u64, g[0] as u64);
+        delta = next_delta;
+        update_de(&mut d, &mut e, t);
+        update_fg(&mut f, &mut g, t);
+        if g == [0; 5] {
+            break;
+        }
+    }
+
+    // f = +-1 here.
+    if f[4] < 0 {
+        d = add_signed62([0; 5], d, -1);
+    }
+    while d[4] < 0 {
+        d = add_signed62(d, MODULUS_S62, 1);
+    }
+    loop {
+        let reduced = add_signed62(d, MODULUS_S62, -1);
+        if reduced[4] < 0 {
+            break;
+        }
+        d = reduced;
+    }
+
+    from_signed62(d)
 }
 
 #[inline(always)]
