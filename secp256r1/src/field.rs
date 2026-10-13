@@ -579,75 +579,31 @@ fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 
 #[inline(always)]
 fn montgomery_square(a: [u64; 4]) -> [u64; 4] {
-    let a0 = a[0] as u128;
-    let a1 = a[1] as u128;
-    let a2 = a[2] as u128;
-    let a3 = a[3] as u128;
+    // Off-diagonal products, computed once and then doubled.
+    let (w1, carry) = mac(0, a[0], a[1], 0);
+    let (w2, carry) = mac(0, a[0], a[2], carry);
+    let (w3, w4) = mac(0, a[0], a[3], carry);
+    let (w3, carry) = mac(w3, a[1], a[2], 0);
+    let (w4, w5) = mac(w4, a[1], a[3], carry);
+    let (w5, w6) = mac(w5, a[2], a[3], 0);
 
-    let p00 = a0 * a0;
-    let w0 = p00 as u64;
-    let mut acc = p00 >> 64;
-    let mut top = 0u64;
+    let w7 = w6 >> 63;
+    let w6 = (w6 << 1) | (w5 >> 63);
+    let w5 = (w5 << 1) | (w4 >> 63);
+    let w4 = (w4 << 1) | (w3 >> 63);
+    let w3 = (w3 << 1) | (w2 >> 63);
+    let w2 = (w2 << 1) | (w1 >> 63);
+    let w1 = w1 << 1;
 
-    let p01 = a0 * a1;
-    top += (p01 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p01 << 1);
-    let w1 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p02 = a0 * a2;
-    top += (p02 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p02 << 1);
-    acc = sum;
-    top += u64::from(overflow);
-    let (sum, overflow) = acc.overflowing_add(a1 * a1);
-    let w2 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p03 = a0 * a3;
-    top += (p03 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p03 << 1);
-    acc = sum;
-    top += u64::from(overflow);
-    let p12 = a1 * a2;
-    top += (p12 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p12 << 1);
-    let w3 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p13 = a1 * a3;
-    top += (p13 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p13 << 1);
-    acc = sum;
-    top += u64::from(overflow);
-    let (sum, overflow) = acc.overflowing_add(a2 * a2);
-    let w4 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    top = 0;
-    let p23 = a2 * a3;
-    top += (p23 >> 127) as u64;
-    let (sum, overflow) = acc.overflowing_add(p23 << 1);
-    let w5 = sum as u64;
-    acc = sum >> 64;
-    top += u64::from(overflow);
-
-    acc |= (top as u128) << 64;
-    let (sum, overflow) = acc.overflowing_add(a3 * a3);
-    let w6 = sum as u64;
-    let w7 = (sum >> 64) as u64;
-    debug_assert!(!overflow);
+    // Diagonal squares.
+    let (w0, carry) = mac(0, a[0], a[0], 0);
+    let (w1, carry) = adc(w1, 0, carry);
+    let (w2, carry) = mac(w2, a[1], a[1], carry);
+    let (w3, carry) = adc(w3, 0, carry);
+    let (w4, carry) = mac(w4, a[2], a[2], carry);
+    let (w5, carry) = adc(w5, 0, carry);
+    let (w6, carry) = mac(w6, a[3], a[3], carry);
+    let (w7, _) = adc(w7, 0, carry);
 
     montgomery_reduce_words(w0, w1, w2, w3, w4, w5, w6, w7)
 }
@@ -676,27 +632,35 @@ fn montgomery_reduce_words(
     r6: u64,
     r7: u64,
 ) -> [u64; 4] {
-    let (r1, carry) = mac(r1, r0, MODULUS[1], r0);
+    // MODULUS[1] = 2^32 - 1, so x * MODULUS[1] + x = x * 2^32.
+    let (r1, carry) = add_shl32(r1, r0);
     let (r2, carry) = adc(r2, 0, carry);
     let (r3, carry) = mac(r3, r0, MODULUS[3], carry);
     let (r4, carry2) = adc(r4, 0, carry);
 
-    let (r2, carry) = mac(r2, r1, MODULUS[1], r1);
+    let (r2, carry) = add_shl32(r2, r1);
     let (r3, carry) = adc(r3, 0, carry);
     let (r4, carry) = mac(r4, r1, MODULUS[3], carry);
     let (r5, carry2) = adc(r5, carry2, carry);
 
-    let (r3, carry) = mac(r3, r2, MODULUS[1], r2);
+    let (r3, carry) = add_shl32(r3, r2);
     let (r4, carry) = adc(r4, 0, carry);
     let (r5, carry) = mac(r5, r2, MODULUS[3], carry);
     let (r6, carry2) = adc(r6, carry2, carry);
 
-    let (r4, carry) = mac(r4, r3, MODULUS[1], r3);
+    let (r4, carry) = add_shl32(r4, r3);
     let (r5, carry) = adc(r5, 0, carry);
     let (r6, carry) = mac(r6, r3, MODULUS[3], carry);
     let (r7, r8) = adc(r7, carry2, carry);
 
     reduce_wide([r4, r5, r6, r7, r8])
+}
+
+/// Returns `a + x * 2^32` as a low word and a carry word.
+#[inline(always)]
+fn add_shl32(a: u64, x: u64) -> (u64, u64) {
+    let sum = (a as u128) + ((x as u128) << 32);
+    (sum as u64, (sum >> 64) as u64)
 }
 
 #[inline(always)]
