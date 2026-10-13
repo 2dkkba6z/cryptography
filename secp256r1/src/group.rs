@@ -380,7 +380,7 @@ impl ProjectivePoint {
         let u2 = rhs.x * z1z1;
         let s2 = rhs.y * self.z * z1z1;
         let h = u2 - self.x;
-        let slope_num = double(s2 - self.y);
+        let slope_num = s2 - self.y;
 
         if h.is_zero() {
             return if slope_num.is_zero() {
@@ -391,12 +391,11 @@ impl ProjectivePoint {
         }
 
         let hh = h.square();
-        let i = double(double(hh));
-        let j = h * i;
-        let v = self.x * i;
-        let x = slope_num.square() - j - double(v);
-        let y = slope_num * (v - x) - double(self.y * j);
-        let z = double(self.z * h);
+        let hhh = h * hh;
+        let v = self.x * hh;
+        let x = slope_num.square() - hhh - double(v);
+        let y = slope_num * (v - x) - self.y * hhh;
+        let z = self.z * h;
 
         Self { x, y, z }
     }
