@@ -701,13 +701,14 @@ fn montgomery_reduce_words(
 
 #[inline(always)]
 fn reduce_wide(value: [u64; 5]) -> [u64; 4] {
-    let (w0, borrow) = sbb(value[0], MODULUS[0], 0);
-    let (w1, borrow) = sbb(value[1], MODULUS[1], borrow);
-    let (w2, borrow) = sbb(value[2], MODULUS[2], borrow);
-    let (w3, borrow) = sbb(value[3], MODULUS[3], borrow);
-    let (_, borrow) = sbb(value[4], 0, borrow);
+    // Adding 2^256 - p carries out of 256 bits exactly when the low limbs are
+    // at least p, and its low 256 bits are then the value minus p.
+    let (w0, high) = adc(value[0], MODULUS_COMPLEMENT[0], 0);
+    let (w1, high) = adc(value[1], MODULUS_COMPLEMENT[1], high);
+    let (w2, high) = adc(value[2], MODULUS_COMPLEMENT[2], high);
+    let (w3, high) = adc(value[3], MODULUS_COMPLEMENT[3], high);
 
-    if borrow == 0 {
+    if (value[4] | high) != 0 {
         [w0, w1, w2, w3]
     } else {
         [value[0], value[1], value[2], value[3]]
@@ -722,8 +723,9 @@ fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
 
 #[inline(always)]
 fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
-    let difference = (a as u128).wrapping_sub((b as u128) + (borrow as u128));
-    (difference as u64, u64::from((difference >> 127) != 0))
+    let (difference, borrow1) = a.overflowing_sub(b);
+    let (difference, borrow2) = difference.overflowing_sub(borrow);
+    (difference, u64::from(borrow1 | borrow2))
 }
 
 #[inline(always)]
