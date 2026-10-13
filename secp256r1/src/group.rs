@@ -420,7 +420,7 @@ impl ProjectivePoint {
     #[inline]
     pub fn mul_scalar_vartime_unchecked(self, scalar: [u8; 32]) -> Self {
         // Odd multiples P, 3P, ..., 15P for a width-5 signed NAF.
-        let affine_table = batch_normalize(odd_multiples(self));
+        let affine_table = batch_normalize(odd_multiples::<8>(self));
 
         let naf = wnaf5(&scalar);
         let mut out = Self::IDENTITY;
@@ -489,11 +489,13 @@ impl ProjectivePoint {
         point: AffinePoint,
         point_scalar: [u8; 32],
     ) -> Self {
-        // Odd multiples G, 3G, ..., 15G and P, 3P, ..., 15P for width-5
-        // signed NAFs of both scalars.
+        // Odd multiples G, 3G, ..., 127G for a width-8 signed NAF of the
+        // generator scalar and P, 3P, ..., 15P for a width-5 one of the point
+        // scalar.
         let generator_table = generator_odd_multiples_table();
-        let point_table = batch_normalize(odd_multiples(Self::from_affine(point)));
-        let generator_naf = wnaf5(&generator_scalar);
+        let point_table: [AffinePoint; 8] =
+            batch_normalize(odd_multiples(Self::from_affine(point)));
+        let generator_naf = wnaf::<8>(&generator_scalar);
         let point_naf = wnaf5(&point_scalar);
         let mut out = Self::IDENTITY;
 
@@ -550,7 +552,7 @@ impl ProjectivePoint {
         // affine and is not normalized again.
         let mut projective = Vec::with_capacity(points.len() * 7);
         for point in points {
-            projective.extend_from_slice(&odd_multiples(Self::from_affine(*point))[1..]);
+            projective.extend_from_slice(&odd_multiples::<8>(Self::from_affine(*point))[1..]);
         }
         let normalized = batch_normalize_slice(&projective);
         let mut affine = Vec::with_capacity(points.len() * 8);
@@ -651,12 +653,12 @@ fn double(x: FieldElement) -> FieldElement {
 /// `Z = 1`, using mixed additions. Results are mapped back by multiplying
 /// their `Z` by the `Z` of 2P.
 #[inline]
-fn odd_multiples(base: ProjectivePoint) -> [ProjectivePoint; 8] {
+fn odd_multiples<const N: usize>(base: ProjectivePoint) -> [ProjectivePoint; N] {
     let base2 = base.double();
-    let mut table = [base; 8];
+    let mut table = [base; N];
 
     if base2.is_identity() {
-        for i in 1..8 {
+        for i in 1..N {
             table[i] = table[i - 1] + base2;
         }
         return table;
@@ -689,6 +691,13 @@ fn odd_multiples(base: ProjectivePoint) -> [ProjectivePoint; 8] {
 /// Width-5 non-adjacent form of a big-endian 256-bit integer, least
 /// significant digit first. Every digit is zero or odd in `-15..=15`.
 fn wnaf5(scalar: &[u8; 32]) -> [i8; 261] {
+    wnaf::<5>(scalar)
+}
+
+/// Width-`W` non-adjacent form of a big-endian 256-bit integer, least
+/// significant digit first. Every digit is zero or odd with absolute value
+/// below `2^(W - 1)`. Only digits up to index 256 can be nonzero.
+fn wnaf<const W: usize>(scalar: &[u8; 32]) -> [i8; 261] {
     let mut limbs = [0u64; 5];
     for (i, limb) in limbs.iter_mut().take(4).enumerate() {
         let start = 32 - 8 * (i + 1);
@@ -704,28 +713,31 @@ fn wnaf5(scalar: &[u8; 32]) -> [i8; 261] {
     while pos < 256 {
         let idx = pos / 64;
         let bit = pos % 64;
-        let bits = if bit < 59 {
+        let bits = if bit + W < 64 {
             limbs[idx] >> bit
         } else {
             (limbs[idx] >> bit) | (limbs[idx + 1] << (64 - bit))
         };
-        let window = carry + (bits & 31);
+        let window = carry + (bits & ((1 << W) - 1));
 
         if window & 1 == 0 {
             pos += 1;
             continue;
         }
 
-        if window < 16 {
+        if window < 1 << (W - 1) {
             carry = 0;
             naf[pos] = window as i8;
         } else {
             carry = 1;
-            naf[pos] = window as i8 - 32;
+            naf[pos] = (window as i16 - (1 << W)) as i8;
         }
-        pos += 5;
+        pos += W;
     }
-    naf[pos] = carry as i8;
+    // A final carry implies the scalar is at least 2^(pos - 1), so pos <= 256.
+    if carry != 0 {
+        naf[pos] = 1;
+    }
 
     naf
 }
@@ -744,17 +756,18 @@ fn generator_window8_table() -> &'static [[AffinePoint; BASE_WINDOW_POINTS]; BAS
         .as_ref()
 }
 
-fn generator_odd_multiples_table() -> &'static [AffinePoint; 8] {
-    static TABLE: OnceLock<[AffinePoint; 8]> = OnceLock::new();
+/// Odd multiples G, 3G, ..., 127G for width-8 signed NAFs.
+fn generator_odd_multiples_table() -> &'static [AffinePoint; 64] {
+    static TABLE: OnceLock<[AffinePoint; 64]> = OnceLock::new();
 
     TABLE.get_or_init(|| batch_normalize(odd_multiples(ProjectivePoint::GENERATOR)))
 }
 
 /// Adds the odd multiple selected by a signed NAF digit, if any.
 #[inline]
-fn add_naf_digit(
+fn add_naf_digit<const N: usize>(
     point: ProjectivePoint,
-    table: &[AffinePoint; 8],
+    table: &[AffinePoint; N],
     digit: i8,
 ) -> ProjectivePoint {
     if digit > 0 {
