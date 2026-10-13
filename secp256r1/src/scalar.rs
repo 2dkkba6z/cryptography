@@ -258,15 +258,16 @@ fn divsteps_62(mut eta: i64, mut f: u64, mut g: u64) -> (i64, [i64; 4]) {
     (eta, [u as i64, v as i64, q as i64, r as i64])
 }
 
-/// Applies the matrix to `f` and `g`, dividing exactly by `2^62`.
+/// Applies the matrix to the low `len` limbs of `f` and `g` (limb `len - 1`
+/// carries the sign), dividing exactly by `2^62`.
 #[inline(always)]
-fn update_fg(f: &mut Signed62, g: &mut Signed62, t: [i64; 4]) {
+fn update_fg(f: &mut Signed62, g: &mut Signed62, len: usize, t: [i64; 4]) {
     let [u, v, q, r] = t.map(i128::from);
     let mut cf = u * f[0] as i128 + v * g[0] as i128;
     let mut cg = q * f[0] as i128 + r * g[0] as i128;
     cf >>= 62;
     cg >>= 62;
-    for i in 1..5 {
+    for i in 1..len {
         cf += u * f[i] as i128 + v * g[i] as i128;
         cg += q * f[i] as i128 + r * g[i] as i128;
         f[i - 1] = (cf as i64) & M62;
@@ -274,8 +275,8 @@ fn update_fg(f: &mut Signed62, g: &mut Signed62, t: [i64; 4]) {
         cf >>= 62;
         cg >>= 62;
     }
-    f[4] = cf as i64;
-    g[4] = cg as i64;
+    f[len - 1] = cf as i64;
+    g[len - 1] = cg as i64;
 }
 
 /// Applies the matrix to `d` and `e` and divides by `2^62` modulo n.
@@ -314,19 +315,27 @@ fn invert_canonical(a: [u64; 4]) -> [u64; 4] {
     let mut d = [0i64; 5];
     let mut e = to_signed62(R2);
     let mut eta = -1i64;
+    let mut len = 5usize;
 
     loop {
         let (next_eta, t) = divsteps_62(eta, f[0] as u64, g[0] as u64);
         eta = next_eta;
         update_de(&mut d, &mut e, t);
-        update_fg(&mut f, &mut g, t);
-        if g == [0; 5] {
+        update_fg(&mut f, &mut g, len, t);
+        if g[..len].iter().all(|&l| l == 0) {
             break;
+        }
+        // Drop the top limb once it is pure sign extension in both f and g.
+        let (ft, gt) = (f[len - 1], g[len - 1]);
+        if len > 1 && (ft == 0 || ft == -1) && (gt == 0 || gt == -1) {
+            f[len - 2] |= ft << 62;
+            g[len - 2] |= gt << 62;
+            len -= 1;
         }
     }
 
     // f = +-1 here.
-    if f[4] < 0 {
+    if f[len - 1] < 0 {
         d = add_signed62([0; 5], d, -1);
     }
     while d[4] < 0 {
